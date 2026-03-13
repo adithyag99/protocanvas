@@ -97,6 +97,17 @@
   }
 }
 
+/* Cursor overrides per interaction mode — controlled via data-mode on wrapper */
+[data-mode="select"] .react-flow__pane {
+  cursor: default !important;
+}
+[data-mode="pan"] .react-flow__pane {
+  cursor: grab !important;
+}
+[data-mode="pan"] .react-flow__pane:active {
+  cursor: grabbing !important;
+}
+
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
