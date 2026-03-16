@@ -1,9 +1,5 @@
 import { useReactFlow } from "@xyflow/react"
-
-export interface Guide {
-  pos: number
-  axis: "x" | "y"
-}
+import type { Guide } from "@/lib/snap"
 
 export function SnapGuides({ guides }: { guides: Guide[] }) {
   const { getViewport } = useReactFlow()

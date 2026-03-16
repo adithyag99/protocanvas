@@ -1,37 +1,53 @@
 import { create } from "zustand"
-import type { AppConfig, CanvasState, FeedbackState, FeedbackEntry } from "@/types/canvas"
+import type { AppConfig, CanvasState, VariantNodeData, CanvasEdge } from "@/types/canvas"
+
+// Undo history entry
+interface UndoEntry {
+  type: "remove"
+  nodes: Record<string, VariantNodeData>
+  edges: CanvasEdge[]
+}
 
 interface ModalVariant {
   nodeId: string
   label: string
   htmlFile: string
+  type?: "html" | "tsx"
 }
 
 interface CanvasStore {
   // Data
   config: AppConfig | null
   canvasState: CanvasState | null
-  feedback: FeedbackState
   iframeHeights: Record<string, number>
   nodeWidths: Record<string, number>
+  annotationCounts: Record<string, number>
   modalVariant: ModalVariant | null
 
   // View
   focusMode: boolean
+  focusedNodeId: string | null
+  preFocusViewport: { x: number; y: number; zoom: number } | null
+
+  // Undo
+  undoStack: UndoEntry[]
 
   // Loading
   loading: boolean
 
+  // Error
+  syncError: string | null
+
   // Actions
   toggleFocusMode: () => void
+  enterFocus: (nodeId: string) => void
+  exitFocus: () => void
+  removeNodes: (ids: string[]) => void
+  undo: () => void
   init: () => Promise<void>
   updateNodePosition: (id: string, x: number, y: number) => void
-  togglePick: (id: string) => void
-  updateFeedback: (id: string, text: string) => void
-  setFeedbackAction: (id: string, action: "branch" | "iterate") => void
   setIframeHeight: (id: string, height: number) => void
   updateViewport: (x: number, y: number, zoom: number) => void
-  clearFeedback: () => void
   setNodeWidth: (id: string, width: number) => void
   openModal: (variant: ModalVariant) => void
   closeModal: () => void
@@ -39,40 +55,57 @@ interface CanvasStore {
   unhideNode: (id: string) => void
   removeNode: (id: string) => void
   syncState: () => Promise<void>
-  syncFeedback: () => Promise<void>
   refetchState: () => Promise<void>
+  clearSyncError: () => void
 }
 
-let stateSyncTimer: ReturnType<typeof setTimeout> | null = null
-let feedbackSyncTimer: ReturnType<typeof setTimeout> | null = null
+let positionSyncTimer: ReturnType<typeof setTimeout> | null = null
+let widthSyncTimer: ReturnType<typeof setTimeout> | null = null
 let viewportSyncTimer: ReturnType<typeof setTimeout> | null = null
 
 export const useCanvasStore = create<CanvasStore>((set, get) => ({
   config: null,
   canvasState: null,
-  feedback: { picked: [], feedback: {} },
   iframeHeights: {},
   nodeWidths: {},
+  annotationCounts: {},
   modalVariant: null,
   focusMode: false,
+  focusedNodeId: null,
+  preFocusViewport: null,
+  undoStack: [],
   loading: true,
+  syncError: null,
+
+  clearSyncError: () => set({ syncError: null }),
 
   toggleFocusMode: () => set((s) => ({ focusMode: !s.focusMode })),
 
+  enterFocus: (nodeId: string) => {
+    set({ focusedNodeId: nodeId })
+  },
+
+  exitFocus: () => {
+    set({ focusedNodeId: null, preFocusViewport: null })
+  },
+
   init: async () => {
     try {
-      const [configRes, stateRes, feedbackRes] = await Promise.all([
+      const [configRes, stateRes] = await Promise.all([
         fetch("/api/config"),
         fetch("/api/state"),
-        fetch("/__feedback"),
       ])
       const config: AppConfig = await configRes.json()
       const canvasState: CanvasState = await stateRes.json()
-      const feedback: FeedbackState = await feedbackRes.json()
-      set({ config, canvasState, feedback, loading: false })
+      // Restore persisted custom widths
+      const nodeWidths: Record<string, number> = {}
+      for (const [id, node] of Object.entries(canvasState.nodes)) {
+        if (node.customWidth) nodeWidths[id] = node.customWidth
+      }
+      set({ config, canvasState, nodeWidths, loading: false })
     } catch (err) {
       console.error("Failed to init canvas store:", err)
-      set({ loading: false })
+      set({ loading: false, syncError: err instanceof Error ? err.message : 'Failed to initialize canvas' })
     }
   },
 
@@ -88,55 +121,8 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
         },
       },
     })
-    // Debounced sync
-    if (stateSyncTimer) clearTimeout(stateSyncTimer)
-    stateSyncTimer = setTimeout(() => get().syncState(), 500)
-  },
-
-  togglePick: (id) => {
-    const fb = get().feedback
-    const picked = fb.picked.includes(id)
-      ? fb.picked.filter((p) => p !== id)
-      : [...fb.picked, id]
-    set({ feedback: { ...fb, picked } })
-    // Immediate sync on pick
-    setTimeout(() => get().syncFeedback(), 0)
-  },
-
-  updateFeedback: (id, text) => {
-    const fb = get().feedback
-    const existing = fb.feedback[id]
-    const entry: FeedbackEntry =
-      typeof existing === "object" && existing !== null
-        ? { ...existing, text, read: false }
-        : { text, action: "branch", read: false }
-
-    set({
-      feedback: {
-        ...fb,
-        feedback: { ...fb.feedback, [id]: entry },
-      },
-    })
-    // Debounced sync
-    if (feedbackSyncTimer) clearTimeout(feedbackSyncTimer)
-    feedbackSyncTimer = setTimeout(() => get().syncFeedback(), 400)
-  },
-
-  setFeedbackAction: (id, action) => {
-    const fb = get().feedback
-    const existing = fb.feedback[id]
-    const entry: FeedbackEntry =
-      typeof existing === "object" && existing !== null
-        ? { ...existing, action }
-        : { text: "", action, read: false }
-
-    set({
-      feedback: {
-        ...fb,
-        feedback: { ...fb.feedback, [id]: entry },
-      },
-    })
-    setTimeout(() => get().syncFeedback(), 0)
+    if (positionSyncTimer) clearTimeout(positionSyncTimer)
+    positionSyncTimer = setTimeout(() => get().syncState(), 500)
   },
 
   setIframeHeight: (id, height) => {
@@ -157,17 +143,29 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ viewport: { x, y, zoom } }),
-      }).catch(() => {})
+      }).catch((err) => { set({ syncError: err.message || 'Sync failed' }) })
     }, 1000)
   },
 
-  clearFeedback: () => {
-    set({ feedback: { picked: [], feedback: {} } })
-    setTimeout(() => get().syncFeedback(), 0)
-  },
-
   setNodeWidth: (id, width) => {
-    set((s) => ({ nodeWidths: { ...s.nodeWidths, [id]: width } }))
+    set((s) => {
+      const state = s.canvasState
+      if (state?.nodes[id]) {
+        return {
+          nodeWidths: { ...s.nodeWidths, [id]: width },
+          canvasState: {
+            ...state,
+            nodes: {
+              ...state.nodes,
+              [id]: { ...state.nodes[id], customWidth: width },
+            },
+          },
+        }
+      }
+      return { nodeWidths: { ...s.nodeWidths, [id]: width } }
+    })
+    if (widthSyncTimer) clearTimeout(widthSyncTimer)
+    widthSyncTimer = setTimeout(() => get().syncState(), 500)
   },
 
   openModal: (variant) => set({ modalVariant: variant }),
@@ -189,7 +187,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ nodes: { [id]: { hidden: true } } }),
-    }).catch(() => {})
+    }).catch((err) => { set({ syncError: err.message || 'Sync failed' }) })
   },
 
   unhideNode: (id) => {
@@ -208,59 +206,91 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ nodes: { [id]: { hidden: false } } }),
-    }).catch(() => {})
+    }).catch((err) => { set({ syncError: err.message || 'Sync failed' }) })
   },
 
   removeNode: (id) => {
+    get().removeNodes([id])
+  },
+
+  removeNodes: (ids) => {
     const state = get().canvasState
-    if (!state?.nodes[id]) return
-    const { [id]: _, ...remainingNodes } = state.nodes
-    const remainingEdges = state.edges.filter(
-      (e) => e.from !== id && e.to !== id
+    if (!state) return
+
+    // Save removed nodes and affected edges for undo
+    const removedNodes: Record<string, VariantNodeData> = {}
+    for (const id of ids) {
+      if (state.nodes[id]) removedNodes[id] = state.nodes[id]
+    }
+    const removedEdges = state.edges.filter(
+      (e) => ids.includes(e.from) || ids.includes(e.to)
     )
+
+    if (Object.keys(removedNodes).length === 0) return
+
+    // Push to undo stack (max 20 entries)
+    const undoStack = [...get().undoStack, { type: "remove" as const, nodes: removedNodes, edges: removedEdges }].slice(-20)
+
+    const remainingNodes = { ...state.nodes }
+    for (const id of ids) delete remainingNodes[id]
+    const remainingEdges = state.edges.filter(
+      (e) => !ids.includes(e.from) && !ids.includes(e.to)
+    )
+
     set({
-      canvasState: {
-        ...state,
-        nodes: remainingNodes,
-        edges: remainingEdges,
-      },
+      canvasState: { ...state, nodes: remainingNodes, edges: remainingEdges },
+      undoStack,
     })
     fetch("/api/state", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ removeNodes: [id] }),
-    }).catch(() => {})
+      body: JSON.stringify({ removeNodes: ids }),
+    }).catch((err) => { set({ syncError: err.message || 'Sync failed' }) })
+  },
+
+  undo: () => {
+    const stack = get().undoStack
+    if (stack.length === 0) return
+    const entry = stack[stack.length - 1]
+    const state = get().canvasState
+    if (!state) return
+
+    if (entry.type === "remove") {
+      // Restore removed nodes and edges
+      const restoredNodes = { ...state.nodes, ...entry.nodes }
+      const restoredEdges = [...state.edges, ...entry.edges]
+
+      set({
+        canvasState: { ...state, nodes: restoredNodes, edges: restoredEdges },
+        undoStack: stack.slice(0, -1),
+      })
+
+      // Sync restored state to server
+      fetch("/api/state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodes: entry.nodes, edges: restoredEdges }),
+      }).catch((err) => { set({ syncError: err.message || 'Sync failed' }) })
+    }
   },
 
   syncState: async () => {
     const state = get().canvasState
     if (!state) return
-    // Only send positions
-    const positions: Record<string, { position: { x: number; y: number } }> = {}
+    const nodeData: Record<string, { position: { x: number; y: number }; customWidth?: number }> = {}
     for (const [id, node] of Object.entries(state.nodes)) {
-      positions[id] = { position: node.position }
+      nodeData[id] = { position: node.position }
+      if (node.customWidth) nodeData[id].customWidth = node.customWidth
     }
     try {
       await fetch("/api/state", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nodes: positions }),
+        body: JSON.stringify({ nodes: nodeData }),
       })
     } catch (err) {
       console.error("Failed to sync state:", err)
-    }
-  },
-
-  syncFeedback: async () => {
-    const fb = get().feedback
-    try {
-      await fetch("/__feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(fb, null, 2),
-      })
-    } catch (err) {
-      console.error("Failed to sync feedback:", err)
+      set({ syncError: err instanceof Error ? err.message : 'Sync failed' })
     }
   },
 
@@ -268,19 +298,10 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     try {
       const res = await fetch("/api/state")
       const newState: CanvasState = await res.json()
-      // Guard: don't replace current state with empty state
-      const currentState = get().canvasState
-      if (
-        newState.nodes &&
-        Object.keys(newState.nodes).length > 0
-      ) {
-        set({ canvasState: newState })
-      } else if (!currentState || Object.keys(currentState.nodes || {}).length === 0) {
-        // Only accept empty if we also have nothing
-        set({ canvasState: newState })
-      }
+      set({ canvasState: newState })
     } catch (err) {
       console.error("Failed to refetch state:", err)
+      set({ syncError: err instanceof Error ? err.message : 'Failed to refresh state' })
     }
   },
 }))

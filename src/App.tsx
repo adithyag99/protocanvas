@@ -3,6 +3,7 @@ import {
   ReactFlow,
   Background,
   BackgroundVariant,
+  MiniMap,
   ReactFlowProvider,
   useReactFlow,
   applyNodeChanges,
@@ -16,39 +17,42 @@ import { Toolbar, type FilterMode } from "@/components/Toolbar"
 import { VariantNode } from "@/components/VariantNode"
 import { IterationEdge } from "@/components/IterationEdge"
 import { NodeDetail } from "@/components/NodeDetail"
-import { SnapGuides, type Guide } from "@/components/SnapGuides"
+import { SnapGuides } from "@/components/SnapGuides"
+import { snapPosition, type Guide } from "@/lib/snap"
+import { ContextMenu } from "@/components/ContextMenu"
+import { SyncStatus } from "@/components/SyncStatus"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { useCanvasStore } from "@/store/canvasStore"
 
 const nodeTypes = { variant: VariantNode }
 const edgeTypes = { iteration: IterationEdge }
 
-const SNAP_THRESHOLD = 8
-
 type InteractionMode = "select" | "pan"
 
 function Canvas() {
-  const { fitView, getNodes } = useReactFlow()
+  const { fitView, getNodes, getNode, getViewport, setViewport, zoomTo } = useReactFlow()
   const {
     config,
     canvasState,
     loading,
     init,
     updateNodePosition,
-    feedback,
     updateViewport,
     refetchState,
-    clearFeedback,
-    iframeHeights,
     focusMode,
     toggleFocusMode,
+    focusedNodeId,
+    exitFocus,
   } = useCanvasStore()
 
   const [mode, setMode] = useState<InteractionMode>("select")
   const [spaceHeld, setSpaceHeld] = useState(false)
   const [filter, setFilter] = useState<FilterMode>("all")
   const [guides, setGuides] = useState<Guide[]>([])
+  const [showMinimap, setShowMinimap] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
   const localNodesRef = useRef<Node[]>([])
+  const escPressedRef = useRef(false)
 
   const effectiveMode = spaceHeld ? "pan" : mode
 
@@ -61,9 +65,97 @@ function Canvas() {
       )
         return
 
+      // Two-stage Escape: first press sends Escape into iframe (closes Agentation popups),
+      // second press defocuses the card
+      if (e.code === "Escape") {
+        const fid = useCanvasStore.getState().focusedNodeId
+        if (fid) {
+          e.preventDefault()
+          // Find the focused iframe and try to dispatch Escape into it
+          const iframes = document.querySelectorAll('iframe')
+          let forwarded = false
+          for (const iframe of iframes) {
+            if (iframe.style.pointerEvents === 'auto') {
+              try {
+                iframe.contentWindow?.dispatchEvent(new KeyboardEvent('keydown', {
+                  key: 'Escape', code: 'Escape', bubbles: true,
+                }))
+                forwarded = true
+              } catch { /* cross-origin — can't forward */ }
+            }
+          }
+          // If we couldn't forward (cross-origin TSX iframe), or it's a second press, defocus
+          if (!forwarded) {
+            exitFocus()
+          } else {
+            // Give Agentation a frame to close, then check if we should defocus too
+            // Use a flag so second Escape always defocuses
+            if (escPressedRef.current) {
+              exitFocus()
+              escPressedRef.current = false
+            } else {
+              escPressedRef.current = true
+              setTimeout(() => { escPressedRef.current = false }, 500)
+            }
+          }
+          return
+        }
+        setContextMenu(null)
+        return
+      }
+      if (e.code === "KeyZ" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+        e.preventDefault()
+        useCanvasStore.getState().undo()
+        return
+      }
+      // Arrow key navigation between nodes
+      if (e.code === "ArrowRight" || e.code === "ArrowLeft" || e.code === "ArrowUp" || e.code === "ArrowDown") {
+        const fid = useCanvasStore.getState().focusedNodeId
+        if (fid) {
+          e.preventDefault()
+          const cs = useCanvasStore.getState().canvasState
+          const allNodes = localNodesRef.current.filter(n => {
+            const sn = cs?.nodes[n.id]
+            return sn && !sn.hidden
+          })
+          if (allNodes.length <= 1) return
+          const current = allNodes.find(n => n.id === fid)
+          if (!current) return
+
+          // primary = axis of travel, secondary = cross-axis (weighted 0.3)
+          const horiz = e.code === "ArrowRight" || e.code === "ArrowLeft"
+          const positive = e.code === "ArrowRight" || e.code === "ArrowDown"
+          const next = allNodes
+            .filter(n => {
+              if (n.id === fid) return false
+              const delta = horiz
+                ? n.position.x - current.position.x
+                : n.position.y - current.position.y
+              return positive ? delta > 0 : delta < 0
+            })
+            .sort((a, b) => {
+              const dist = (n: Node) => {
+                const primary = horiz
+                  ? Math.abs(n.position.x - current.position.x)
+                  : Math.abs(n.position.y - current.position.y)
+                const secondary = horiz
+                  ? Math.abs(n.position.y - current.position.y)
+                  : Math.abs(n.position.x - current.position.x)
+                return primary + secondary * 0.3
+              }
+              return dist(a) - dist(b)
+            })[0]
+          if (next) {
+            useCanvasStore.getState().enterFocus(next.id)
+          }
+          return
+        }
+      }
       if (e.code === "KeyV") { e.preventDefault(); setMode("select") }
       if (e.code === "KeyH") { e.preventDefault(); setMode("pan") }
       if (e.code === "KeyF") { e.preventDefault(); toggleFocusMode() }
+      if (e.code === "KeyM") { e.preventDefault(); setShowMinimap(s => !s) }
+      if (e.code === "KeyR") { e.preventDefault(); zoomTo(1, { duration: 300 }) }
       if (e.code === "Space" && !e.repeat) {
         e.preventDefault()
         setSpaceHeld(true)
@@ -76,27 +168,132 @@ function Canvas() {
         document.body.style.cursor = ""
       }
     }
+    // Listen for forwarded keys and annotation changes from iframes
+    const handleMessage = (e: MessageEvent) => {
+      if (e.data?.type === 'variant-keydown') {
+        handleKeyDown(new KeyboardEvent('keydown', { code: e.data.code, key: e.data.key }))
+      }
+      if (e.data?.type === 'annotation-change') {
+        // Ignore iframe-reported deltas — refetch authoritative count from server instead
+        refetchAnnotationCounts()
+      }
+      // Store annotations on the canvas server
+      if (e.data?.type === 'annotation-add') {
+        fetch('/api/annotations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variantId: e.data.variantId, annotation: e.data.annotation }),
+        }).catch(() => {})
+      }
+      if (e.data?.type === 'annotation-delete') {
+        fetch(`/api/annotations/${e.data.annotationId}`, { method: 'DELETE' }).catch(() => {})
+      }
+      if (e.data?.type === 'annotation-clear') {
+        fetch(`/api/annotations?variantId=${e.data.variantId}`, { method: 'DELETE' }).catch(() => {})
+      }
+    }
     window.addEventListener("keydown", handleKeyDown)
     window.addEventListener("keyup", handleKeyUp)
+    window.addEventListener("message", handleMessage)
     return () => {
       window.removeEventListener("keydown", handleKeyDown)
       window.removeEventListener("keyup", handleKeyUp)
+      window.removeEventListener("message", handleMessage)
     }
   }, [])
 
+  // Double-click focus: zoom to 100% and center on the focused node
+  useEffect(() => {
+    if (!focusedNodeId) return
+
+    // Save current viewport for restoration
+    const currentVP = getViewport()
+    useCanvasStore.setState({ preFocusViewport: currentVP })
+
+    const node = getNode(focusedNodeId)
+    if (!node) return
+
+    const nodeW = node.measured?.width ?? 452
+    const nodeH = node.measured?.height ?? 400
+    const windowW = window.innerWidth
+    const windowH = window.innerHeight
+
+    // Center with padding on all sides
+    // Center horizontally always
+    const x = -(node.position.x - (windowW - nodeW) / 2)
+
+    // Vertically: center if it fits, align to top (with padding) if taller than viewport
+    const topPadding = 64
+    const fitsVertically = nodeH < windowH - topPadding * 2
+    const y = fitsVertically
+      ? -(node.position.y - (windowH - nodeH) / 2)
+      : -(node.position.y - topPadding)
+
+    setViewport({ x, y, zoom: 1 }, { duration: 300 })
+  }, [focusedNodeId, getNode, getViewport, setViewport])
+
+  // Restore viewport when exiting focus
+  const prevFocusedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (prevFocusedRef.current && !focusedNodeId) {
+      const preFocusVP = useCanvasStore.getState().preFocusViewport
+      if (preFocusVP) {
+        setViewport(preFocusVP, { duration: 300 })
+      }
+    }
+    prevFocusedRef.current = focusedNodeId
+  }, [focusedNodeId, setViewport])
+
   useEffect(() => { init() }, [init])
 
-  // SSE
+  // Fetch authoritative annotation counts from canvas server
+  const refetchAnnotationCounts = useCallback(async () => {
+    try {
+      const res = await fetch('/api/annotations')
+      if (!res.ok) return
+      const data = await res.json()
+      const counts: Record<string, number> = {}
+      for (const ann of data.annotations) {
+        counts[ann.variantId] = (counts[ann.variantId] ?? 0) + 1
+      }
+      useCanvasStore.setState({ annotationCounts: counts })
+    } catch { /* server not ready */ }
+  }, [])
+
+  // Fetch on load
+  useEffect(() => {
+    if (!canvasState?.nodes) return
+    refetchAnnotationCounts()
+  }, [canvasState?.nodes ? "loaded" : "", refetchAnnotationCounts])
+
+  // SSE — listen for state changes and variant HTML file changes
+  const [variantReloadKey, setVariantReloadKey] = useState(0)
   useEffect(() => {
     const es = new EventSource("/__reload")
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data)
         if (data.type === "state-changed") refetchState()
+        if (data.type === "variant-changed") setVariantReloadKey((k) => k + 1)
+        if (data.type === "app-rebuilt") window.location.reload()
+        if (data.type === "annotation-added") {
+          refetchAnnotationCounts()
+        }
+        if (data.type === "annotations-resolved") {
+          refetchAnnotationCounts()
+          // Clear Agentation localStorage in the affected variant's iframe
+          // Safe from loops: server-side dedup + sentAnnotationIds prevent re-POSTing
+          const iframes = document.querySelectorAll('iframe')
+          for (const iframe of iframes) {
+            try {
+              iframe.contentWindow?.postMessage({ type: 'clear-agentation' }, '*')
+            } catch { /* cross-origin */ }
+          }
+        }
       } catch {}
     }
     return () => es.close()
-  }, [refetchState])
+  }, [refetchState, refetchAnnotationCounts])
 
   // Convert canvas state to React Flow nodes
   const storeNodes: Node[] = useMemo(() => {
@@ -108,9 +305,10 @@ function Canvas() {
       data: {
         ...node,
         variantWidth: canvasState.variantWidth || 420,
+        reloadKey: variantReloadKey,
       },
     }))
-  }, [canvasState, iframeHeights])
+  }, [canvasState, variantReloadKey])
 
   const [localNodes, setLocalNodes] = useState<Node[]>(storeNodes)
 
@@ -128,35 +326,31 @@ function Canvas() {
     return Object.values(canvasState.nodes).filter((n) => n.hidden).length
   }, [canvasState])
 
+  // Auto-switch back to "all" when no hidden cards remain
+  useEffect(() => {
+    if (filter === "hidden" && hiddenCount === 0) {
+      setFilter("all")
+    }
+  }, [hiddenCount, filter])
+
   const nodes: Node[] = useMemo(() => {
     if (filter === "hidden") {
-      return localNodes.filter((node) => {
-        const storeNode = canvasState?.nodes[node.id]
-        return storeNode?.hidden
-      })
+      // Show all cards — both visible and hidden
+      return localNodes
     }
     // Default: hide hidden nodes
-    const visible = localNodes.filter((node) => {
+    return localNodes.filter((node) => {
       const storeNode = canvasState?.nodes[node.id]
       return !storeNode?.hidden
     })
-    if (filter === "all") return visible
-    return visible.filter((node) => {
-      if (filter === "picked") return feedback.picked.includes(node.id)
-      if (filter === "with-feedback") {
-        const entry = feedback.feedback[node.id]
-        const text = typeof entry === "string" ? entry : entry?.text ?? ""
-        return text.trim().length > 0
-      }
-      return true
-    })
-  }, [localNodes, filter, feedback, canvasState])
+  }, [localNodes, filter, canvasState])
 
   const edges: Edge[] = useMemo(() => {
     if (!canvasState?.edges) return []
+    const nodeMap = new Map(localNodes.map((n) => [n.id, n]))
     return canvasState.edges.map((edge, i) => {
-      const sourceNode = localNodes.find((n) => n.id === edge.from)
-      const targetNode = localNodes.find((n) => n.id === edge.to)
+      const sourceNode = nodeMap.get(edge.from)
+      const targetNode = nodeMap.get(edge.to)
 
       let sourceHandle = "bottom"
       let targetHandle = "top"
@@ -174,7 +368,6 @@ function Canvas() {
         const dx = tx - sx
         const dy = ty - sy
 
-        // If horizontal distance is dominant, use right→left
         if (Math.abs(dx) > Math.abs(dy) * 0.8) {
           if (dx > 0) {
             sourceHandle = "right"
@@ -196,89 +389,41 @@ function Canvas() {
         sourceHandle,
         targetHandle,
         type: "iteration",
-        data: { label: edge.label },
+        data: { label: edge.label, feedbackText: edge.feedbackText },
       }
     })
   }, [canvasState, localNodes])
 
-  // Smart snap: check alignment with other nodes and snap if close
-  const snapPosition = useCallback(
-    (id: string, x: number, y: number) => {
-      const allNodes = localNodesRef.current
-      const draggedNode = allNodes.find((n) => n.id === id)
-      if (!draggedNode) return { x, y, guides: [] as Guide[] }
-
-      const dw = draggedNode.measured?.width ?? 452
-      const dh = draggedNode.measured?.height ?? 300
-
-      let snappedX = x
-      let snappedY = y
-      let didSnapX = false
-      let didSnapY = false
-      const newGuides: Guide[] = []
-
-      for (const node of allNodes) {
-        if (node.id === id) continue
-        const nw = node.measured?.width ?? 452
-        const nh = node.measured?.height ?? 300
-        const nx = node.position.x
-        const ny = node.position.y
-
-        // --- Vertical guides (snap X) ---
-        if (!didSnapX) {
-          // Left ↔ Left
-          if (Math.abs(x - nx) < SNAP_THRESHOLD) {
-            snappedX = nx; didSnapX = true
-            newGuides.push({ pos: nx, axis: "x" })
-          }
-          // Right ↔ Right
-          else if (Math.abs((x + dw) - (nx + nw)) < SNAP_THRESHOLD) {
-            snappedX = nx + nw - dw; didSnapX = true
-            newGuides.push({ pos: nx + nw, axis: "x" })
-          }
-          // Center ↔ Center (X)
-          else if (Math.abs((x + dw / 2) - (nx + nw / 2)) < SNAP_THRESHOLD) {
-            snappedX = nx + nw / 2 - dw / 2; didSnapX = true
-            newGuides.push({ pos: nx + nw / 2, axis: "x" })
-          }
-        }
-
-        // --- Horizontal guides (snap Y) ---
-        if (!didSnapY) {
-          // Top ↔ Top
-          if (Math.abs(y - ny) < SNAP_THRESHOLD) {
-            snappedY = ny; didSnapY = true
-            newGuides.push({ pos: ny, axis: "y" })
-          }
-          // Bottom ↔ Bottom
-          else if (Math.abs((y + dh) - (ny + nh)) < SNAP_THRESHOLD) {
-            snappedY = ny + nh - dh; didSnapY = true
-            newGuides.push({ pos: ny + nh, axis: "y" })
-          }
-          // Center ↔ Center (Y)
-          else if (Math.abs((y + dh / 2) - (ny + nh / 2)) < SNAP_THRESHOLD) {
-            snappedY = ny + nh / 2 - dh / 2; didSnapY = true
-            newGuides.push({ pos: ny + nh / 2, axis: "y" })
-          }
-        }
-
-        if (didSnapX && didSnapY) break
-      }
-
-      return { x: snappedX, y: snappedY, guides: newGuides }
-    },
-    []
-  )
+  const removeNodes = useCanvasStore((s) => s.removeNodes)
 
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => {
-      // Process changes: snap positions during drag AND on drag end
-      const processedChanges = changes.map((change) => {
+      // Collect removals and handle them via store (persists + supports undo)
+      const removeIds = changes
+        .filter((c) => c.type === "remove")
+        .map((c) => c.id)
+
+      if (removeIds.length > 0) {
+        removeNodes(removeIds)
+      }
+
+      // Process non-remove changes (position, selection, etc.)
+      const nonRemoveChanges = changes.filter((c) => c.type !== "remove")
+
+      const snapNodes = localNodesRef.current.map((n) => ({
+        id: n.id,
+        position: n.position,
+        width: n.measured?.width ?? 452,
+        height: n.measured?.height ?? 300,
+      }))
+
+      const processedChanges = nonRemoveChanges.map((change) => {
         if (change.type === "position" && change.position) {
           const { x, y, guides: g } = snapPosition(
             change.id,
             change.position.x,
-            change.position.y
+            change.position.y,
+            snapNodes
           )
           if (change.dragging) {
             setGuides(g)
@@ -288,9 +433,10 @@ function Canvas() {
         return change
       })
 
-      setLocalNodes((nds) => applyNodeChanges(processedChanges, nds))
+      if (processedChanges.length > 0) {
+        setLocalNodes((nds) => applyNodeChanges(processedChanges, nds))
+      }
 
-      // Clear guides and persist on drag end
       for (const change of processedChanges) {
         if (change.type === "position" && !change.dragging) {
           setGuides([])
@@ -300,10 +446,10 @@ function Canvas() {
         }
       }
     },
-    [snapPosition, updateNodePosition]
+    [updateNodePosition, removeNodes]
   )
 
-  // Tidy up: auto-arrange nodes in a tree layout (roots in a row, children below parents)
+  // Tidy up: auto-arrange nodes in a tree layout
   const tidyUp = useCallback(() => {
     const rfNodes = getNodes()
     if (rfNodes.length === 0) return
@@ -311,7 +457,6 @@ function Canvas() {
     const GAP_X = 60
     const GAP_Y = 80
 
-    // Build parent→children map
     const childrenOf: Record<string, string[]> = {}
     const roots: string[] = []
     for (const n of rfNodes) {
@@ -325,13 +470,32 @@ function Canvas() {
       }
     }
 
-    // Measure node sizes from React Flow
     const sizeOf = (id: string) => {
       const n = rfNodes.find((r) => r.id === id)
       return { w: n?.measured?.width ?? 452, h: n?.measured?.height ?? 400 }
     }
 
-    // Calculate subtree width (recursive)
+    const depthOf: Record<string, number> = {}
+    const assignDepths = (id: string, depth: number) => {
+      depthOf[id] = depth
+      for (const childId of childrenOf[id] || []) {
+        assignDepths(childId, depth + 1)
+      }
+    }
+    for (const rootId of roots) assignDepths(rootId, 0)
+
+    const maxHeightAtDepth: Record<number, number> = {}
+    for (const [id, depth] of Object.entries(depthOf)) {
+      const h = sizeOf(id).h
+      maxHeightAtDepth[depth] = Math.max(maxHeightAtDepth[depth] ?? 0, h)
+    }
+
+    const yAtDepth: Record<number, number> = { 0: 0 }
+    const maxDepth = Math.max(...Object.keys(maxHeightAtDepth).map(Number))
+    for (let d = 1; d <= maxDepth; d++) {
+      yAtDepth[d] = yAtDepth[d - 1] + (maxHeightAtDepth[d - 1] ?? 0) + GAP_Y
+    }
+
     const subtreeWidth = (id: string): number => {
       const children = childrenOf[id] || []
       if (children.length === 0) return sizeOf(id).w
@@ -339,19 +503,18 @@ function Canvas() {
       return Math.max(sizeOf(id).w, childWidths.reduce((a, b) => a + b + GAP_X, -GAP_X))
     }
 
-    // Position nodes recursively
     const positions: Record<string, { x: number; y: number }> = {}
-    const placeSubtree = (id: string, x: number, y: number) => {
+    const placeSubtree = (id: string, x: number) => {
       const size = sizeOf(id)
       const tw = subtreeWidth(id)
-      // Center this node over its subtree
-      positions[id] = { x: x + (tw - size.w) / 2, y }
+      const depth = depthOf[id]
+      positions[id] = { x: x + (tw - size.w) / 2, y: yAtDepth[depth] }
       const children = childrenOf[id] || []
       if (children.length === 0) return
       let cx = x
       for (const childId of children) {
         const cw = subtreeWidth(childId)
-        placeSubtree(childId, cx, y + size.h + GAP_Y)
+        placeSubtree(childId, cx)
         cx += cw + GAP_X
       }
     }
@@ -359,27 +522,43 @@ function Canvas() {
     let startX = 0
     for (const rootId of roots) {
       const tw = subtreeWidth(rootId)
-      placeSubtree(rootId, startX, 0)
+      placeSubtree(rootId, startX)
       startX += tw + GAP_X
     }
 
-    // Apply positions
     setLocalNodes((nds) =>
       nds.map((n) => positions[n.id] ? { ...n, position: positions[n.id] } : n)
     )
-    // Persist all positions
-    for (const [id, pos] of Object.entries(positions)) {
-      updateNodePosition(id, pos.x, pos.y)
+    const state = useCanvasStore.getState().canvasState
+    if (state) {
+      const updatedNodes = { ...state.nodes }
+      for (const [id, pos] of Object.entries(positions)) {
+        if (updatedNodes[id]) {
+          updatedNodes[id] = { ...updatedNodes[id], position: pos }
+        }
+      }
+      useCanvasStore.setState({
+        canvasState: { ...state, nodes: updatedNodes },
+      })
+      useCanvasStore.getState().syncState()
     }
     setTimeout(() => fitView({ padding: 0.15 }), 50)
-  }, [getNodes, canvasState, setLocalNodes, updateNodePosition, fitView])
+  }, [getNodes, canvasState, setLocalNodes, fitView])
 
-  // Fit view once
+  // Restore saved viewport on initial load, or fitView if no saved viewport
+  const hasFittedRef = useRef(false)
   useEffect(() => {
-    if (nodes.length > 0) {
-      setTimeout(() => fitView({ padding: 0.15 }), 100)
+    if (storeNodes.length > 0 && !hasFittedRef.current) {
+      hasFittedRef.current = true
+      const vp = canvasState?.viewport
+      if (vp && (vp.x !== 0 || vp.y !== 0 || vp.zoom !== 1)) {
+        // Restore saved viewport
+        setTimeout(() => setViewport(vp, { duration: 0 }), 100)
+      } else {
+        setTimeout(() => fitView({ padding: 0.15 }), 100)
+      }
     }
-  }, [nodes.length > 0]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [storeNodes.length, fitView, setViewport, canvasState?.viewport])
 
   if (loading) {
     return (
@@ -393,43 +572,45 @@ function Canvas() {
     <div className="w-screen h-screen" data-mode={effectiveMode}>
       <Toolbar
         component={config?.component ?? ""}
-        nodeCount={nodes.length}
         hiddenCount={hiddenCount}
-        mode={mode}
-        onModeChange={setMode}
         focusMode={focusMode}
         onFocusModeToggle={toggleFocusMode}
         filter={filter}
         onFilterChange={setFilter}
-        onClearFeedback={() => {
-          if (window.confirm("Clear all feedback and picks?")) {
-            clearFeedback()
-          }
-        }}
         onTidyUp={tidyUp}
+        onExitFocus={focusedNodeId ? exitFocus : undefined}
       />
       <ReactFlow
         nodes={nodes}
-        edges={edges}
+        edges={focusMode ? [] : edges}
         onNodesChange={onNodesChange}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        fitView
         className="pt-10"
         proOptions={{ hideAttribution: true }}
         onMoveEnd={(_, viewport) => {
           updateViewport(viewport.x, viewport.y, viewport.zoom)
         }}
+        onPaneClick={() => {
+          if (focusedNodeId) exitFocus()
+          setContextMenu(null)
+        }}
+        onNodeContextMenu={(e, node) => {
+          e.preventDefault()
+          setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id })
+        }}
         minZoom={0.1}
         maxZoom={2}
         defaultEdgeOptions={{ type: "iteration" }}
-        panOnDrag={effectiveMode === "pan"}
-        selectionOnDrag={effectiveMode === "select"}
+        panOnDrag={effectiveMode === "pan" ? [0, 1] : [1]}
+        selectionOnDrag={focusedNodeId ? false : effectiveMode === "select"}
         selectionMode={SelectionMode.Partial}
-        nodesDraggable={effectiveMode === "select"}
+        nodesDraggable={!focusedNodeId && effectiveMode === "select"}
         panOnScroll={true}
         panOnScrollSpeed={1.5}
         zoomOnScroll={false}
+        zoomOnPinch={!focusedNodeId}
+        zoomOnDoubleClick={false}
       >
         <Background
           variant={BackgroundVariant.Dots}
@@ -439,8 +620,25 @@ function Canvas() {
           style={{ backgroundColor: "#ebebeb" }}
         />
         <SnapGuides guides={guides} />
+        {showMinimap && (
+          <MiniMap
+            style={{ bottom: 16, right: 16, width: 160, height: 100 }}
+            maskColor="rgba(0,0,0,0.08)"
+            pannable
+            zoomable
+          />
+        )}
       </ReactFlow>
       <NodeDetail />
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          nodeId={contextMenu.nodeId}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+      <SyncStatus />
     </div>
   )
 }

@@ -8,12 +8,15 @@ export interface VariantNodeData {
   avoids: string
   createdAt: string
   hidden?: boolean
+  customWidth?: number
+  type?: "html" | "tsx"
 }
 
 export interface CanvasEdge {
   from: string
   to: string
   label: string
+  feedbackText?: string
 }
 
 export interface CanvasState {
@@ -25,20 +28,10 @@ export interface CanvasState {
   viewport: { x: number; y: number; zoom: number }
 }
 
-export interface FeedbackEntry {
-  text: string
-  action: "branch" | "iterate"
-  read: boolean
-}
-
-export interface FeedbackState {
-  picked: string[]
-  feedback: Record<string, FeedbackEntry | string>
-}
-
 export interface AppConfig {
   component: string
   dir: string
   variantsDir: string
   port: number
+  vitePort?: number
 }

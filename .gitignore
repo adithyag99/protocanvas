@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+IDEAS.md
+UPGRADE-IDEAS.md
+CLAUDE.md
 
 # Editor directories and files
 .vscode/*

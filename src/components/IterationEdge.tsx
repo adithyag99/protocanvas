@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react"
+import { memo, useCallback, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import {
   BaseEdge,
@@ -6,16 +6,17 @@ import {
   getBezierPath,
   type EdgeProps,
 } from "@xyflow/react"
-import { useCanvasStore } from "@/store/canvasStore"
+
 
 interface IterationEdgeData {
   label?: string
+  feedbackText?: string
 }
 
 const TOOLTIP_GAP = 6
 const VIEWPORT_PAD = 12
 
-export function IterationEdge({
+export const IterationEdge = memo(function IterationEdge({
   id,
   source,
   sourceX,
@@ -31,8 +32,6 @@ export function IterationEdge({
   const [tooltipStyle, setTooltipStyle] = useState<React.CSSProperties>({})
   const labelRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
-  const feedback = useCanvasStore((s) => s.feedback)
-
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX,
     sourceY,
@@ -42,10 +41,13 @@ export function IterationEdge({
     targetPosition,
   })
 
-  // Get the feedback text from the source (parent) node
-  const entry = feedback.feedback[source]
-  const feedbackText =
-    typeof entry === "string" ? entry : entry?.text ?? ""
+  const feedbackText = data?.feedbackText || ""
+
+  // Strip "branch" from the label for display
+  const displayLabel = data?.label
+    ?.replace(/^branch$/i, "")
+    .replace(/^branch\s*[:\-–—]\s*/i, "")
+    .trim()
 
   const positionTooltip = useCallback(() => {
     const label = labelRef.current
@@ -62,23 +64,16 @@ export function IterationEdge({
     let placement: "below" | "above" | "right" | "left" = "below"
 
     if (top + tr.height > vh - VIEWPORT_PAD) {
-      // Try above
       if (lr.top - TOOLTIP_GAP - tr.height > VIEWPORT_PAD) {
         top = lr.top - TOOLTIP_GAP - tr.height
         placement = "above"
-      }
-      // Try right
-      else if (lr.right + TOOLTIP_GAP + tr.width < vw - VIEWPORT_PAD) {
+      } else if (lr.right + TOOLTIP_GAP + tr.width < vw - VIEWPORT_PAD) {
         top = lr.top + (lr.height - tr.height) / 2
         placement = "right"
-      }
-      // Try left
-      else if (lr.left - TOOLTIP_GAP - tr.width > VIEWPORT_PAD) {
+      } else if (lr.left - TOOLTIP_GAP - tr.width > VIEWPORT_PAD) {
         top = lr.top + (lr.height - tr.height) / 2
         placement = "left"
-      }
-      // Fallback: just clamp below
-      else {
+      } else {
         top = Math.min(top, vh - VIEWPORT_PAD - tr.height)
       }
     }
@@ -89,13 +84,10 @@ export function IterationEdge({
     } else if (placement === "left") {
       left = lr.left - TOOLTIP_GAP - tr.width
     } else {
-      // Center horizontally under/above the label
       left = lr.left + lr.width / 2 - tr.width / 2
     }
 
-    // Clamp horizontal to viewport
     left = Math.max(VIEWPORT_PAD, Math.min(left, vw - VIEWPORT_PAD - tr.width))
-    // Clamp vertical to viewport
     top = Math.max(VIEWPORT_PAD, Math.min(top, vh - VIEWPORT_PAD - tr.height))
 
     setTooltipStyle({ top, left })
@@ -103,8 +95,9 @@ export function IterationEdge({
 
   const handleMouseEnter = useCallback(() => {
     setHovered(true)
-    // Position after the tooltip renders
-    requestAnimationFrame(() => positionTooltip())
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => positionTooltip())
+    })
   }, [positionTooltip])
 
   return (
@@ -127,8 +120,29 @@ export function IterationEdge({
             onMouseEnter={handleMouseEnter}
             onMouseLeave={() => setHovered(false)}
           >
-            <div className="text-[10px] font-medium text-muted-foreground bg-background border border-border rounded-md px-2 py-0.5 shadow-sm hover:text-foreground hover:border-foreground/20 hover:shadow-md transition-colors cursor-default">
-              {data.label}
+            {/* Hover zone — fixed size so cursor doesn't jump */}
+            <div className="relative flex items-center justify-center w-8 h-8 cursor-default">
+              {/* Dot — fades out on hover */}
+              <div
+                className="absolute w-2.5 h-2.5 rounded-full border border-border bg-background shadow-sm"
+                style={{
+                  opacity: hovered ? 0 : 1,
+                  transition: "opacity 150ms cubic-bezier(0.23, 1, 0.32, 1)",
+                }}
+              />
+              {/* Pill — fades in + scales from 0.95 on hover */}
+              <div
+                className="absolute flex items-center justify-center px-2 py-0.5 rounded-full border border-border bg-background shadow-md will-change-transform"
+                style={{
+                  opacity: hovered ? 1 : 0,
+                  transform: hovered ? "scale(1)" : "scale(0.92)",
+                  transition: "opacity 150ms cubic-bezier(0.23, 1, 0.32, 1), transform 150ms cubic-bezier(0.23, 1, 0.32, 1)",
+                }}
+              >
+                <span className="text-[10px] font-medium text-foreground whitespace-nowrap">
+                  {displayLabel}
+                </span>
+              </div>
             </div>
           </div>
         </EdgeLabelRenderer>
@@ -141,7 +155,7 @@ export function IterationEdge({
             zIndex: 9999,
             ...tooltipStyle,
           }}
-          className="w-max max-w-[280px] rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md pointer-events-none"
+          className="w-max max-w-[280px] rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md pointer-events-none animate-in fade-in zoom-in-95 duration-150"
         >
           <div className="font-medium text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
             Feedback on {source}
@@ -152,4 +166,4 @@ export function IterationEdge({
       )}
     </>
   )
-}
+})
