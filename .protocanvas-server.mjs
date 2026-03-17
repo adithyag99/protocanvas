@@ -209,7 +209,10 @@ loadStateFromDisk();
 // ── SSE clients ──
 const clients = new Set();
 
-let suppressStateChangeCount = 0;
+// Track the last content WE wrote so we can distinguish our own writes from external edits.
+// The old suppressStateChangeCount approach was racy — fs.watch can coalesce multiple rapid
+// file changes into a single event, causing external edits to be silently suppressed.
+let lastWrittenContent = null;
 
 /**
  * Send an SSE message to all connected clients.
@@ -227,12 +230,23 @@ function broadcast(eventData) {
 try {
   watch(STATE_FILE, { persistent: true }, (eventType) => {
     if (eventType === 'change') {
-      if (suppressStateChangeCount > 0) {
-        suppressStateChangeCount--;
-        return;
-      }
-      loadStateFromDisk();
-      broadcast({ type: 'state-changed' });
+      try {
+        const diskContent = readFileSync(STATE_FILE, 'utf8');
+        if (diskContent === lastWrittenContent) {
+          // Our own write — ignore
+          return;
+        }
+        // External edit — load it
+        const parsed = JSON.parse(diskContent);
+        if (parsed && typeof parsed === 'object') {
+          if (parsed.nodes && Object.keys(parsed.nodes).length > 0) {
+            stateCache = parsed;
+          } else if (!stateCache) {
+            stateCache = parsed;
+          }
+        }
+        broadcast({ type: 'state-changed' });
+      } catch { /* file read/parse error — ignore */ }
     }
   });
 } catch { /* file may not exist yet */ }
@@ -252,10 +266,13 @@ try {
 } catch { /* directory may not exist yet */ }
 
 // Watch dist directory — broadcast reload when canvas app is rebuilt
+// Debounced: Vite build deletes then recreates dist/, so we wait for it to settle
+let appRebuiltTimer = null;
 try {
   watch(CANVAS_DIST, { persistent: true }, (eventType, filename) => {
     if (filename && filename.endsWith('.html')) {
-      broadcast({ type: 'app-rebuilt' });
+      if (appRebuiltTimer) clearTimeout(appRebuiltTimer);
+      appRebuiltTimer = setTimeout(() => broadcast({ type: 'app-rebuilt' }), 500);
     }
   });
 } catch { /* dist may not exist yet */ }
@@ -401,10 +418,11 @@ const server = createServer((req, res) => {
       const merged = deepMergeState(existing, partial);
       stateCache = merged;
 
-      suppressStateChangeCount++;
-      writeFile(STATE_FILE, JSON.stringify(merged, null, 2), 'utf8', (writeErr) => {
+      const jsonStr = JSON.stringify(merged, null, 2);
+      lastWrittenContent = jsonStr;
+      writeFile(STATE_FILE, jsonStr, 'utf8', (writeErr) => {
         if (writeErr) {
-          suppressStateChangeCount--;
+          lastWrittenContent = null;
           res.writeHead(500); res.end('Write error'); return;
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -417,9 +435,18 @@ const server = createServer((req, res) => {
   // ── Annotations storage (persisted to disk, queryable by Claude) ──
   if (pathname === '/api/annotations' && req.method === 'GET') {
     const variantId = url.searchParams.get('variantId');
-    const result = variantId
+    const statusFilter = url.searchParams.get('status');
+    let result = variantId
       ? annotations.filter(a => a.variantId === variantId)
       : annotations;
+    // Default to pending-only for count accuracy; pass ?status=all to get everything
+    if (statusFilter === 'all') {
+      // return all
+    } else if (statusFilter) {
+      result = result.filter(a => a.status === statusFilter);
+    } else {
+      result = result.filter(a => a.status !== 'applied');
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ count: result.length, annotations: result }));
     return;
@@ -515,14 +542,30 @@ const server = createServer((req, res) => {
 
   stat(absPath, (err, stats) => {
     if (err || !stats.isFile()) {
-      readFile(join(CANVAS_DIST, 'index.html'), 'utf8', (fallbackErr, html) => {
-        if (fallbackErr) { res.writeHead(404); res.end('Not found'); return; }
-        res.writeHead(200, {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
+      const serveIndex = () => {
+        readFile(join(CANVAS_DIST, 'index.html'), 'utf8', (fallbackErr, html) => {
+          if (fallbackErr) {
+            // index.html may be temporarily missing during rebuild — retry once after 300ms
+            setTimeout(() => {
+              readFile(join(CANVAS_DIST, 'index.html'), 'utf8', (retryErr, retryHtml) => {
+                if (retryErr) { res.writeHead(404); res.end('Not found'); return; }
+                res.writeHead(200, {
+                  'Content-Type': 'text/html; charset=utf-8',
+                  'Cache-Control': 'no-cache, no-store, must-revalidate',
+                });
+                res.end(retryHtml);
+              });
+            }, 300);
+            return;
+          }
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+          });
+          res.end(html);
         });
-        res.end(html);
-      });
+      };
+      serveIndex();
       return;
     }
 

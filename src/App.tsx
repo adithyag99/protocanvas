@@ -108,6 +108,42 @@ function Canvas() {
         useCanvasStore.getState().undo()
         return
       }
+      // Cmd+C — copy focused variant reference to clipboard
+      if (e.key === "c" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+        const fid = useCanvasStore.getState().focusedNodeId
+        const cs = useCanvasStore.getState().canvasState
+        const cfg = useCanvasStore.getState().config
+        if (fid && cs?.nodes[fid] && cfg) {
+          e.preventDefault()
+          const node = cs.nodes[fid]
+          // Build lineage trail
+          const lineage: string[] = []
+          let cur: typeof node | undefined = node
+          while (cur) {
+            lineage.unshift(cur.id)
+            cur = cur.parentId ? cs.nodes[cur.parentId] : undefined
+          }
+          const filePath = `${cfg.dir}/${cfg.variantsDir}/${node.htmlFile}`
+          const block = [
+            `**${node.id}** — ${node.label}`,
+            `Component: ${cfg.component}`,
+            `File: ${filePath}`,
+            `Lineage: ${lineage.join(" → ")}`,
+            node.rationale ? `Rationale: ${node.rationale}` : null,
+            `URL: http://localhost:${cfg.port} (variant ${node.id})`,
+          ].filter(Boolean).join("\n")
+          navigator.clipboard.writeText(block).then(() => {
+            // Brief flash on the focused card border as confirmation
+            const el = document.querySelector(`[data-id="${fid}"]`)
+            if (el instanceof HTMLElement) {
+              el.style.outline = "2px solid #1e6be6"
+              el.style.outlineOffset = "2px"
+              setTimeout(() => { el.style.outline = ""; el.style.outlineOffset = "" }, 300)
+            }
+          })
+          return
+        }
+      }
       // Arrow key navigation between nodes
       if (e.code === "ArrowRight" || e.code === "ArrowLeft" || e.code === "ArrowUp" || e.code === "ArrowDown") {
         const fid = useCanvasStore.getState().focusedNodeId
@@ -254,6 +290,7 @@ function Canvas() {
       const data = await res.json()
       const counts: Record<string, number> = {}
       for (const ann of data.annotations) {
+        if (ann.status === 'applied') continue
         counts[ann.variantId] = (counts[ann.variantId] ?? 0) + 1
       }
       useCanvasStore.setState({ annotationCounts: counts })
@@ -266,15 +303,25 @@ function Canvas() {
     refetchAnnotationCounts()
   }, [canvasState?.nodes ? "loaded" : "", refetchAnnotationCounts])
 
-  // SSE — listen for state changes and variant HTML file changes
-  const [variantReloadKey, setVariantReloadKey] = useState(0)
+  // SSE — listen for state changes and variant file changes
+  // Per-variant reload keys: only the changed HTML variant reloads. TSX variants use Vite HMR.
+  const [variantReloadKeys, setVariantReloadKeys] = useState<Record<string, number>>({})
   useEffect(() => {
     const es = new EventSource("/__reload")
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data)
         if (data.type === "state-changed") refetchState()
-        if (data.type === "variant-changed") setVariantReloadKey((k) => k + 1)
+        if (data.type === "variant-changed" && data.file) {
+          if (data.file.endsWith('.html')) {
+            // Force-reload HTML variants (no HMR)
+            const variantId = data.file.replace('.html', '')
+            setVariantReloadKeys((prev) => ({ ...prev, [variantId]: (prev[variantId] ?? 0) + 1 }))
+          } else if (data.file.endsWith('.tsx')) {
+            // New TSX file? Refetch state so the card appears (Vite HMR only works for existing modules)
+            refetchState()
+          }
+        }
         if (data.type === "app-rebuilt") window.location.reload()
         if (data.type === "annotation-added") {
           refetchAnnotationCounts()
@@ -305,15 +352,40 @@ function Canvas() {
       data: {
         ...node,
         variantWidth: canvasState.variantWidth || 420,
-        reloadKey: variantReloadKey,
+        reloadKey: variantReloadKeys[node.id] ?? 0,
       },
     }))
-  }, [canvasState, variantReloadKey])
+  }, [canvasState, variantReloadKeys])
 
   const [localNodes, setLocalNodes] = useState<Node[]>(storeNodes)
 
   useEffect(() => {
-    setLocalNodes(storeNodes)
+    setLocalNodes((prev) => {
+      // Merge store nodes into local nodes — preserve local positions during drag
+      const prevMap = new Map(prev.map((n) => [n.id, n]))
+      const prevIds = new Set(prev.map((n) => n.id))
+
+      // Quick check: if same IDs and same count, merge positions only
+      const sameSet = storeNodes.length === prev.length && storeNodes.every((n) => prevIds.has(n.id))
+
+      const merged = storeNodes.map((sn) => {
+        const local = prevMap.get(sn.id)
+        if (local) {
+          return { ...sn, position: local.position, measured: local.measured }
+        }
+        return sn
+      })
+
+      // Always update if nodes were added or removed
+      if (!sameSet) return merged
+
+      // Same nodes — only update if data changed (new reload key, label change, etc.)
+      const dataChanged = merged.some((n, i) => {
+        const p = prev[i]
+        return !p || n.id !== p.id || n.data !== p.data
+      })
+      return dataChanged ? merged : prev
+    })
   }, [storeNodes])
 
   // Keep ref in sync for snap calculations
