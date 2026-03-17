@@ -4,8 +4,6 @@ export interface VariantNodeData {
   parentId: string | null
   position: { x: number; y: number }
   htmlFile: string
-  rationale: string
-  avoids: string
   createdAt: string
   hidden?: boolean
   customWidth?: number

@@ -75,7 +75,6 @@ function Canvas() {
       `Component: ${cfg.component}`,
       `File: ${filePath}`,
       `Lineage: ${lineage.join(" → ")}`,
-      node.rationale ? `Rationale: ${node.rationale}` : null,
       `URL: http://localhost:${cfg.port} (variant ${node.id})`,
     ].filter(Boolean).join("\n")
     navigator.clipboard.writeText(block).then(() => {
