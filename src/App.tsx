@@ -53,8 +53,36 @@ function Canvas() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
   const localNodesRef = useRef<Node[]>([])
   const escPressedRef = useRef(false)
+  const [toast, setToast] = useState<string | null>(null)
 
   const effectiveMode = spaceHeld ? "pan" : mode
+
+  // Copy variant reference to clipboard
+  const copyVariantReference = useCallback((nodeId: string) => {
+    const cs = useCanvasStore.getState().canvasState
+    const cfg = useCanvasStore.getState().config
+    if (!cs?.nodes[nodeId] || !cfg) return
+    const node = cs.nodes[nodeId]
+    const lineage: string[] = []
+    let cur: typeof node | undefined = node
+    while (cur) {
+      lineage.unshift(cur.id)
+      cur = cur.parentId ? cs.nodes[cur.parentId] : undefined
+    }
+    const filePath = `${cfg.dir}/${cfg.variantsDir}/${node.htmlFile}`
+    const block = [
+      `**${node.id}** — ${node.label}`,
+      `Component: ${cfg.component}`,
+      `File: ${filePath}`,
+      `Lineage: ${lineage.join(" → ")}`,
+      node.rationale ? `Rationale: ${node.rationale}` : null,
+      `URL: http://localhost:${cfg.port} (variant ${node.id})`,
+    ].filter(Boolean).join("\n")
+    navigator.clipboard.writeText(block).then(() => {
+      setToast(`Copied ${node.id} reference`)
+      setTimeout(() => setToast(null), 1500)
+    })
+  }, [])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -108,39 +136,12 @@ function Canvas() {
         useCanvasStore.getState().undo()
         return
       }
-      // Cmd+C — copy focused variant reference to clipboard
-      if (e.key === "c" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+      // Cmd+Shift+C — copy focused variant reference to clipboard
+      if (e.key === "c" && (e.metaKey || e.ctrlKey) && e.shiftKey) {
         const fid = useCanvasStore.getState().focusedNodeId
-        const cs = useCanvasStore.getState().canvasState
-        const cfg = useCanvasStore.getState().config
-        if (fid && cs?.nodes[fid] && cfg) {
+        if (fid) {
           e.preventDefault()
-          const node = cs.nodes[fid]
-          // Build lineage trail
-          const lineage: string[] = []
-          let cur: typeof node | undefined = node
-          while (cur) {
-            lineage.unshift(cur.id)
-            cur = cur.parentId ? cs.nodes[cur.parentId] : undefined
-          }
-          const filePath = `${cfg.dir}/${cfg.variantsDir}/${node.htmlFile}`
-          const block = [
-            `**${node.id}** — ${node.label}`,
-            `Component: ${cfg.component}`,
-            `File: ${filePath}`,
-            `Lineage: ${lineage.join(" → ")}`,
-            node.rationale ? `Rationale: ${node.rationale}` : null,
-            `URL: http://localhost:${cfg.port} (variant ${node.id})`,
-          ].filter(Boolean).join("\n")
-          navigator.clipboard.writeText(block).then(() => {
-            // Brief flash on the focused card border as confirmation
-            const el = document.querySelector(`[data-id="${fid}"]`)
-            if (el instanceof HTMLElement) {
-              el.style.outline = "2px solid #1e6be6"
-              el.style.outlineOffset = "2px"
-              setTimeout(() => { el.style.outline = ""; el.style.outlineOffset = "" }, 300)
-            }
-          })
+          copyVariantReference(fid)
           return
         }
       }
@@ -207,7 +208,10 @@ function Canvas() {
     // Listen for forwarded keys and annotation changes from iframes
     const handleMessage = (e: MessageEvent) => {
       if (e.data?.type === 'variant-keydown') {
-        handleKeyDown(new KeyboardEvent('keydown', { code: e.data.code, key: e.data.key }))
+        handleKeyDown(new KeyboardEvent('keydown', { code: e.data.code, key: e.data.key, metaKey: !!e.data.metaKey, ctrlKey: !!e.data.ctrlKey }))
+      }
+      if (e.data?.type === 'variant-copy') {
+        copyVariantReference(e.data.variantId)
       }
       if (e.data?.type === 'annotation-change') {
         // Ignore iframe-reported deltas — refetch authoritative count from server instead
@@ -708,9 +712,17 @@ function Canvas() {
           y={contextMenu.y}
           nodeId={contextMenu.nodeId}
           onClose={() => setContextMenu(null)}
+          onCopyReference={copyVariantReference}
         />
       )}
       <SyncStatus />
+      {toast && (
+        <div
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 rounded-lg bg-foreground text-background px-4 py-2 text-sm font-medium shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-200"
+        >
+          {toast}
+        </div>
+      )}
     </div>
   )
 }

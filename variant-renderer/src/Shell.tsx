@@ -128,8 +128,22 @@ export function Shell({ variantId, children }: ShellProps) {
         window.parent.postMessage({ type: 'variant-keydown', code: e.code, key: e.key }, '*')
       }
     }
-    window.addEventListener('keydown', keyHandler, true) // capture phase to beat browser defaults
-    return () => window.removeEventListener('keydown', keyHandler, true)
+    // Forward Cmd+Shift+C to parent for variant reference copy
+    const cmdCHandler = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key !== 'c' || !e.shiftKey) return
+      if (window.getSelection()?.toString()) return
+      const tag = document.activeElement?.tagName
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return
+      e.preventDefault()
+      e.stopPropagation()
+      window.parent.postMessage({ type: 'variant-copy', variantId }, '*')
+    }
+    document.addEventListener('keydown', keyHandler, true)
+    document.addEventListener('keydown', cmdCHandler, true)
+    return () => {
+      document.removeEventListener('keydown', keyHandler, true)
+      document.removeEventListener('keydown', cmdCHandler, true)
+    }
   }, [])
 
   useEffect(() => {

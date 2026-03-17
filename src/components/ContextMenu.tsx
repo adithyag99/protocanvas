@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react"
-import { Eye, EyeOff, Trash2, Focus, Copy } from "lucide-react"
+import { Eye, EyeOff, Trash2, Focus, Copy, Clipboard } from "lucide-react"
 import { useCanvasStore } from "@/store/canvasStore"
 
 interface ContextMenuProps {
@@ -7,9 +7,10 @@ interface ContextMenuProps {
   y: number
   nodeId: string
   onClose: () => void
+  onCopyReference?: (nodeId: string) => void
 }
 
-export function ContextMenu({ x, y, nodeId, onClose }: ContextMenuProps) {
+export function ContextMenu({ x, y, nodeId, onClose, onCopyReference }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const {
     canvasState,
@@ -44,6 +45,12 @@ export function ContextMenu({ x, y, nodeId, onClose }: ContextMenuProps) {
       label: "Focus",
       icon: Focus,
       onClick: () => { enterFocus(nodeId); onClose() },
+    },
+    {
+      label: "Copy Reference",
+      icon: Clipboard,
+      shortcut: "⇧⌘C",
+      onClick: () => { onCopyReference?.(nodeId); onClose() },
     },
     {
       label: isHidden ? "Unhide" : "Hide",
@@ -114,6 +121,9 @@ export function ContextMenu({ x, y, nodeId, onClose }: ContextMenuProps) {
           >
             <Icon className="h-3.5 w-3.5 opacity-60" />
             {item.label}
+            {'shortcut' in item && item.shortcut && (
+              <span className="ml-auto text-[11px] text-muted-foreground/50 font-mono">{item.shortcut}</span>
+            )}
           </button>
         )
       })}
