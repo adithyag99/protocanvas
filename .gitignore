@@ -29,3 +29,6 @@ fetch-stock-data.js
 *.sw?
 .gstack/
 registry.json
+
+# Swift build artifacts
+manager/.build/
