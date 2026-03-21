@@ -27,3 +27,5 @@ fetch-stock-data.js
 *.njsproj
 *.sln
 *.sw?
+.gstack/
+registry.json

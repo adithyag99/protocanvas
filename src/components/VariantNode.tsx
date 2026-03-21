@@ -190,7 +190,8 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
           {/* Size indicator — editable */}
           <div className="nodrag flex items-center gap-0 text-[10px] font-mono text-muted-foreground/70 shrink-0">
             <input
-              className="w-[34px] bg-transparent text-right outline-none focus:text-foreground rounded px-0.5 tabular-nums"
+              className="bg-transparent text-right outline-none focus:text-foreground rounded px-0.5 tabular-nums"
+              style={{ width: `${String(Math.round(previewWidth)).length + 1}ch` }}
               value={Math.round(previewWidth)}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10)
@@ -200,7 +201,8 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
             />
             <span className="mx-[1px]">&times;</span>
             <input
-              className="w-[34px] bg-transparent outline-none focus:text-foreground rounded px-0.5 tabular-nums"
+              className="bg-transparent outline-none focus:text-foreground rounded px-0.5 tabular-nums"
+              style={{ width: `${String(Math.round(previewHeight)).length + 1}ch` }}
               value={Math.round(previewHeight)}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10)
@@ -261,7 +263,7 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
               pointerEvents: isFocused ? "auto" : "none",
             }}
             title={`${id} — ${data.label}`}
-            sandbox="allow-scripts allow-same-origin"
+            sandbox="allow-scripts allow-same-origin allow-forms"
           />
           {/* Skeleton loading overlay — fades out when iframe reports first height */}
           {!iframeLoaded && (
