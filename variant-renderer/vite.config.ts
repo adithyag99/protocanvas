@@ -1,5 +1,5 @@
 import { resolve, join, extname } from 'path'
-import { readFileSync } from 'fs'
+import { readFile } from 'fs'
 import react from '@vitejs/plugin-react'
 import { defineConfig, Plugin } from 'vite'
 
@@ -28,17 +28,16 @@ function serveVariantsStatic(): Plugin {
         const cleanUrl = req.url.split('?')[0]
         const ext = extname(cleanUrl)
         if (!mimeMap[ext]) return next()
-        try {
-          const filePath = join(resolvedVariantsDir, cleanUrl.replace('/variants/', ''))
-          const data = readFileSync(filePath)
+        const filePath = join(resolvedVariantsDir, cleanUrl.replace('/variants/', ''))
+        if (!filePath.startsWith(resolvedVariantsDir)) return next()
+        readFile(filePath, (err, data) => {
+          if (err) return next()
           res.writeHead(200, {
             'Content-Type': mimeMap[ext],
             'Cache-Control': 'public, max-age=3600',
           })
           res.end(data)
-        } catch {
-          next()
-        }
+        })
       })
     },
   }
@@ -49,13 +48,23 @@ export default defineConfig({
   resolve: {
     alias: {
       '/variants': resolvedVariantsDir,
+      '@number-flow/react': resolve(__dirname, 'node_modules/@number-flow/react/dist/index.mjs'),
     },
+    // Ensure packages imported from variant files resolve from renderer's node_modules
+    // (prevents duplicate React instances when variants import external packages)
+    dedupe: ['react', 'react-dom'],
   },
+  // Each protocanvas instance gets its own dep cache to prevent concurrent
+  // Vite instances from fighting over the same _metadata.json (infinite esbuild loop)
+  cacheDir: `node_modules/.vite-${process.env.VITE_PORT || 'default'}`,
   server: {
     port: Number(process.env.VITE_PORT) || 5174,
     fs: {
       allow: [resolvedVariantsDir, '.'],
     },
+  },
+  optimizeDeps: {
+    include: ['@number-flow/react', 'number-flow', 'number-flow/lite', 'number-flow/csp', 'number-flow/plugins'],
   },
   // SPA fallback so /v19 serves index.html
   appType: 'spa',

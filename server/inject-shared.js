@@ -38,5 +38,7 @@
     window.parent.postMessage({ type: 'variant-height', height: height, width: width }, '*');
   }
   window.addEventListener('load', reportSize);
-  new ResizeObserver(reportSize).observe(document.body);
+  var ro = new ResizeObserver(reportSize);
+  ro.observe(document.body);
+  window.addEventListener('beforeunload', function() { ro.disconnect(); });
 })();

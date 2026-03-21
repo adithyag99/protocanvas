@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFileSync, readFile, writeFile, watch, stat, readdirSync } from 'node:fs';
+import { readFileSync, readFile, writeFile, rename, watch, stat, readdirSync } from 'node:fs';
 import { join, resolve, extname, normalize } from 'node:path';
 import { spawn } from 'node:child_process';
 import { deepMergeState } from './server/deep-merge-state.mjs';
@@ -115,7 +115,7 @@ async function startViteRenderer() {
     }
   } catch { /* port is free */ }
 
-  viteProcess = spawn('npx', ['vite', '--port', String(port)], {
+  viteProcess = spawn(join(VARIANT_RENDERER_DIR, 'node_modules', '.bin', 'vite'), ['--port', String(port)], {
     cwd: VARIANT_RENDERER_DIR,
     env: {
       ...process.env,
@@ -132,6 +132,11 @@ async function startViteRenderer() {
   viteProcess.stderr.on('data', (data) => {
     const line = data.toString().trim();
     if (line) console.error(`[vite] ${line}`);
+  });
+  viteProcess.on('error', (err) => {
+    console.error(`[vite] failed to start: ${err.message}`);
+    viteProcess = null;
+    vitePort = null;
   });
   viteProcess.on('exit', (code) => {
     console.log(`[vite] exited with code ${code}`);
@@ -178,7 +183,9 @@ let annotationSaveTimer = null;
 function saveAnnotations() {
   if (annotationSaveTimer) clearTimeout(annotationSaveTimer);
   annotationSaveTimer = setTimeout(() => {
-    writeFile(ANNOTATIONS_FILE, JSON.stringify(annotations, null, 2), 'utf8', () => {});
+    writeFile(ANNOTATIONS_FILE, JSON.stringify(annotations, null, 2), 'utf8', (err) => {
+      if (err) console.error('Failed to save annotations:', err.message);
+    });
   }, 300);
 }
 
@@ -252,15 +259,21 @@ try {
 } catch { /* file may not exist yet */ }
 
 // Watch variants directory — both .html and .tsx
+// Debounced per-file: macOS fires multiple events per save
+const variantTimers = new Map();
 try {
   watch(VARIANTS_DIR, { persistent: true }, (eventType, filename) => {
     if (filename && (filename.endsWith('.html') || filename.endsWith('.tsx'))) {
-      broadcast({ type: 'variant-changed', file: filename });
+      if (variantTimers.has(filename)) clearTimeout(variantTimers.get(filename));
+      variantTimers.set(filename, setTimeout(() => {
+        variantTimers.delete(filename);
+        broadcast({ type: 'variant-changed', file: filename });
 
-      // If a new .tsx file appears and Vite isn't running, start it
-      if (filename.endsWith('.tsx') && !viteProcess) {
-        startViteRenderer().catch(err => console.error('Failed to start Vite:', err));
-      }
+        // If a new .tsx file appears and Vite isn't running, start it
+        if (filename.endsWith('.tsx') && !viteProcess) {
+          startViteRenderer().catch(err => console.error('Failed to start Vite:', err));
+        }
+      }, 300));
     }
   });
 } catch { /* directory may not exist yet */ }
@@ -420,13 +433,21 @@ const server = createServer((req, res) => {
 
       const jsonStr = JSON.stringify(merged, null, 2);
       lastWrittenContent = jsonStr;
-      writeFile(STATE_FILE, jsonStr, 'utf8', (writeErr) => {
+      const tmpFile = STATE_FILE + '.tmp';
+      writeFile(tmpFile, jsonStr, 'utf8', (writeErr) => {
         if (writeErr) {
           lastWrittenContent = null;
           res.writeHead(500); res.end('Write error'); return;
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{"ok":true}');
+        rename(tmpFile, STATE_FILE, (renameErr) => {
+          if (renameErr) {
+            lastWrittenContent = null;
+            res.writeHead(500); res.end('Write error'); return;
+          }
+          broadcast({ type: 'state-changed' });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{"ok":true}');
+        });
       });
     });
     return;
@@ -499,6 +520,32 @@ const server = createServer((req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');
+    return;
+  }
+
+  // ── POST /api/session — link a Claude Code session to this canvas ──
+  if (pathname === '/api/session' && req.method === 'POST') {
+    readBody(req, res, async (raw) => {
+      try {
+        const { sessionId } = JSON.parse(raw);
+        if (!sessionId) { res.writeHead(400); res.end('{"error":"sessionId required"}'); return; }
+        const { loadRegistry, saveRegistry } = await import('./bin/registry.mjs');
+        const registry = loadRegistry();
+        const entry = registry.canvases[COMPONENT];
+        if (entry) {
+          if (!entry.sessions) entry.sessions = [];
+          entry.sessions = entry.sessions.filter(s => s.sessionId !== sessionId);
+          entry.sessions.unshift({ sessionId, linkedAt: new Date().toISOString() });
+          if (entry.sessions.length > 10) entry.sessions.length = 10;
+          saveRegistry(registry);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(`{"error":"${e.message}"}`);
+      }
+    });
     return;
   }
 
@@ -593,4 +640,17 @@ startViteRenderer()
     console.log(`Component: ${COMPONENT}`);
     console.log(`Variants: ${VARIANTS_DIR}`);
     console.log(`State: ${STATE_FILE}`);
+
+    // Auto-register in the protocanvas registry
+    try {
+      const { upsertCanvas } = await import('./bin/registry.mjs');
+      upsertCanvas(COMPONENT, {
+        component: COMPONENT,
+        projectDir: PROJECT_DIR,
+        variantsDir: VARIANTS_DIR_NAME,
+        port,
+        stateFile: STATE_FILE,
+        lastOpenedAt: new Date().toISOString(),
+      });
+    } catch { /* registry not set up yet, fine */ }
   });
