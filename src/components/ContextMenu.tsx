@@ -35,7 +35,7 @@ export function ContextMenu({ x, y, nodeId, onClose, onCopyReference }: ContextM
   }, [onClose])
 
   // Clamp position so menu doesn't go off-screen
-  const menuW = 180
+  const menuW = 210
   const menuH = 200
   const clampedX = Math.min(x, window.innerWidth - menuW - 8)
   const clampedY = Math.min(y, window.innerHeight - menuH - 8)
@@ -62,23 +62,10 @@ export function ContextMenu({ x, y, nodeId, onClose, onCopyReference }: ContextM
       icon: Copy,
       onClick: () => {
         if (!canvasState || !node) return
-        // Create a duplicate node offset to the right
-        const newId = `${nodeId}-copy`
-        const newNode = {
-          ...node,
-          id: newId,
-          label: `${node.label} (copy)`,
-          position: { x: node.position.x + 480, y: node.position.y },
-          parentId: nodeId,
-          htmlFile: node.htmlFile, // points to same file — user can rename
-          createdAt: new Date().toISOString(),
-        }
-        // Add via API
-        const edges = [...(canvasState.edges || []), { from: nodeId, to: newId, label: "duplicated" }]
-        fetch("/api/state", {
+        fetch("/api/duplicate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ nodes: { [newId]: newNode }, edges }),
+          body: JSON.stringify({ sourceId: nodeId }),
         }).then(() => useCanvasStore.getState().refetchState())
           .catch((err) => { useCanvasStore.setState({ syncError: err.message || 'Failed to duplicate' }) })
         onClose()
@@ -102,7 +89,7 @@ export function ContextMenu({ x, y, nodeId, onClose, onCopyReference }: ContextM
         top: clampedY,
         zIndex: 9998,
       }}
-      className="w-[180px] bg-popover border border-border rounded-lg shadow-lg py-1 animate-in fade-in zoom-in-95 duration-100"
+      className="w-[210px] bg-popover border border-border rounded-lg shadow-lg py-1 animate-in fade-in zoom-in-95 duration-100"
     >
       {items.map((item, i) => {
         if ('type' in item && item.type === "separator") {
@@ -119,8 +106,8 @@ export function ContextMenu({ x, y, nodeId, onClose, onCopyReference }: ContextM
             }`}
             onClick={item.onClick}
           >
-            <Icon className="h-3.5 w-3.5 opacity-60" />
-            {item.label}
+            <Icon className="h-3.5 w-3.5 opacity-60 shrink-0" />
+            <span className="whitespace-nowrap">{item.label}</span>
             {'shortcut' in item && item.shortcut && (
               <span className="ml-auto text-[11px] text-muted-foreground/50 font-mono">{item.shortcut}</span>
             )}

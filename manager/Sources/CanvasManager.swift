@@ -20,19 +20,46 @@ private func logDebug(_ msg: String) {
     }
 }
 
-/// Run a shell command via posix_spawn. Never blocks — fire and forget.
-/// Output is appended to the debug log file.
+private let CMUX_PATH = CMUX_BIN + "/cmux"
+
+/// Run cmux command directly. Returns output string.
+@discardableResult
+private func runCmux(_ arguments: [String]) -> String {
+    logDebug("CMUX: \(arguments.joined(separator: " "))")
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: CMUX_PATH)
+    task.arguments = arguments
+    let outPipe = Pipe()
+    let errPipe = Pipe()
+    task.standardOutput = outPipe
+    task.standardError = errPipe
+    do {
+        try task.run()
+        task.waitUntilExit()
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !err.isEmpty { logDebug("CMUX err: \(err)") }
+        logDebug("CMUX done: exit=\(task.terminationStatus) out=\(out)")
+        return out
+    } catch {
+        logDebug("CMUX FAILED: \(error)")
+        return ""
+    }
+}
+
+/// Run a shell command via /bin/sh. Fire and forget on background thread.
 private func shellRun(_ command: String) {
     logDebug("CMD: \(command)")
-    // Run everything in a detached shell so posix_spawn returns immediately
-    // The inner command runs, logs output, then exits on its own
-    var pid: pid_t = 0
-    let wrappedCommand = "export PATH=\"\(CMUX_BIN):/usr/sbin:/usr/local/bin:$PATH\" && ( \(command) ) >> \"\(LOG_FILE)\" 2>&1"
-    var args = [strdup("/bin/zsh"), strdup("-l"), strdup("-c"), strdup(wrappedCommand), nil]
-
-    let result = posix_spawn(&pid, "/bin/zsh", nil, nil, &args, nil)
-    logDebug("SPAWN: result=\(result) pid=\(pid)")
-    // No waitpid — process runs independently
+    DispatchQueue.global(qos: .userInitiated).async {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", command]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+    }
 }
 
 @MainActor
@@ -294,6 +321,50 @@ class CanvasManager {
         }
     }
 
+    func createNewCanvas(component: String, projectDir: String, variantsDir: String) {
+        // Ensure variants directory exists
+        let variantsPath = (projectDir as NSString).appendingPathComponent(variantsDir)
+        try? FileManager.default.createDirectory(atPath: variantsPath, withIntermediateDirectories: true)
+
+        // Ensure logs dir
+        try? FileManager.default.createDirectory(atPath: logsDir, withIntermediateDirectories: true)
+
+        let safeName = component.replacingOccurrences(of: "[^a-zA-Z0-9\\-_ ]", with: "", options: .regularExpression)
+        let logPath = (logsDir as NSString).appendingPathComponent(safeName + ".log")
+
+        // Start server — it will auto-register in the registry
+        let cmd = "cd \"\(projectDir)\" && nohup node \"\(serverPath)\" \"\(projectDir)\" \"\(component)\" \"\(variantsDir)\" \"\(distPath)\" >> \"\(logPath)\" 2>&1 &"
+        shellRun(cmd)
+
+        // Derive port (same hash as registry.mjs)
+        let port = stablePort(component)
+
+        // Poll for readiness then open browser
+        Task {
+            for _ in 0..<50 {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if await isPortRunning(port) {
+                    await refresh()
+                    // Open in default browser
+                    if let url = URL(string: "http://localhost:\(port)") {
+                        NSWorkspace.shared.open(url)
+                    }
+                    return
+                }
+            }
+            await refresh()
+        }
+    }
+
+    /// Deterministic port from component name (must match registry.mjs stablePort)
+    private func stablePort(_ name: String) -> Int {
+        var hash: Int32 = 0
+        for char in name.unicodeScalars {
+            hash = ((hash &<< 5) &- hash) &+ Int32(char.value)
+        }
+        return 10000 + Int(abs(hash)) % 50000
+    }
+
     func stopCanvas(_ item: CanvasItem) {
         // Direct SIGTERM — no shell, no process spawning, just a C function call
         if let pid = item.pid, pid > 0 {
@@ -327,47 +398,111 @@ class CanvasManager {
         shellRun("cmux browser open \"\(urlStr)\" 2>/dev/null || open \"\(urlStr)\"")
     }
 
-    /// Open a full CMUX workspace: Claude Code session on left, canvas browser on right
+    /// Open in default browser with ?terminal=1 to auto-open the embedded terminal
+    func openInBrowserWithTerminal(_ item: CanvasItem) {
+        let urlStr = "http://localhost:\(item.entry.port)?terminal=1"
+        if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
+    }
+
+    /// Start server, wait for ready, then open in cmux
+    func startAndOpenInCmux(_ item: CanvasItem) {
+        startCanvas(item)
+        let port = item.entry.port
+        Task {
+            for _ in 0..<50 {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if await isPortRunning(port) {
+                    openInCmux(item)
+                    return
+                }
+            }
+            openInCmux(item)
+        }
+    }
+
+    /// Start server, wait for ready, then open in browser with embedded terminal
+    func startAndOpenInBrowser(_ item: CanvasItem) {
+        startCanvas(item)
+        let port = item.entry.port
+        Task {
+            for _ in 0..<50 {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if await isPortRunning(port) {
+                    await MainActor.run { openInBrowserWithTerminal(item) }
+                    return
+                }
+            }
+            await MainActor.run { openInBrowserWithTerminal(item) }
+        }
+    }
+
+    /// Open a full CMUX workspace: Claude Code on left, canvas browser on right
     func openInCmux(_ item: CanvasItem) {
         let urlStr = "http://localhost:\(item.entry.port)"
         let component = item.entry.component
 
-        // Build the claude command
         let claudeCmd: String
+        let cdPrefix = "cd \"\(item.entry.projectDir)\" && "
         if let sid = item.entry.mostRecentSessionId {
-            claudeCmd = "claude -r \(sid)"
+            claudeCmd = cdPrefix + "claude --resume \(sid)"
         } else {
-            claudeCmd = "claude --name 'protocanvas: \(component)'"
+            claudeCmd = cdPrefix + "claude --name 'protocanvas: \(component)'"
         }
 
-        // Step 1: Create CMUX workspace with Claude Code
-        // Step 2: Open browser pane alongside it
-        shellRun("cmux new-workspace --command '\(claudeCmd)' && sleep 0.5 && cmux browser open '\(urlStr)'")
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            // 1. Create workspace with Claude Code
+            let wsOut = runCmux(["new-workspace", "--command", claudeCmd])
+            // Parse workspace ID from "OK <uuid>"
+            let wsId = wsOut.components(separatedBy: " ").last ?? ""
+            guard !wsId.isEmpty else {
+                // Fallback to default browser
+                DispatchQueue.main.async {
+                    if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
+                }
+                return
+            }
+            // 2. Rename workspace
+            runCmux(["rename-workspace", "--workspace", wsId, component])
+            // 3. Open browser split
+            Thread.sleep(forTimeInterval: 0.3)
+            runCmux(["browser", "open", urlStr, "--workspace", wsId])
+        }
     }
 
     /// Just open in CMUX browser (no Claude session)
     func openBrowserOnly(_ item: CanvasItem) {
         let urlStr = "http://localhost:\(item.entry.port)"
-        shellRun("cmux browser open '\(urlStr)' || open '\(urlStr)'")
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let out = runCmux(["browser", "open", urlStr])
+            if out.isEmpty {
+                // CMUX not available, fallback
+                DispatchQueue.main.async {
+                    if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
+                }
+            }
+        }
     }
 
-    /// Copy a combined command: open browser + resume Claude session
+    /// Copy a combined command: cd + start server + resume Claude session
     func copyURL(_ item: CanvasItem) {
         let pb = NSPasteboard.general
         pb.clearContents()
-        let url = "http://localhost:\(item.entry.port)"
-        if let sid = item.entry.mostRecentSessionId {
-            pb.setString("open \(url) && claude --session-id \(sid)", forType: .string)
-        } else {
-            pb.setString("open \(url)", forType: .string)
+        let entry = item.entry
+        var parts: [String] = []
+        // Start the server (opens browser too)
+        parts.append("protocanvas open \"\(entry.component)\"")
+        // Resume Claude session
+        if let sid = entry.mostRecentSessionId {
+            parts.append("claude --resume \(sid)")
         }
+        pb.setString(parts.joined(separator: " && "), forType: .string)
     }
 
     func copyResumeCommand(_ item: CanvasItem) {
         let pb = NSPasteboard.general
         pb.clearContents()
         if let sid = item.entry.mostRecentSessionId {
-            pb.setString("claude --session-id \(sid)", forType: .string)
+            pb.setString("claude --resume \(sid)", forType: .string)
         } else {
             pb.setString("claude --name \"protocanvas: \(item.entry.component)\"", forType: .string)
         }

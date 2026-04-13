@@ -25,12 +25,15 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
     enterFocus,
   } = useCanvasStore()
   const annotationCount = useCanvasStore((s) => s.annotationCounts[id] ?? 0)
+  const activity = useCanvasStore((s) => s.agentActivity[id])
+  const isAgentActive = !!activity
 
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const resizeCleanupRef = useRef<(() => void) | null>(null)
   const [localSize, setLocalSize] = useState<{ w?: number; h?: number } | null>(null)
   const [resizeCursor, setResizeCursor] = useState<string | null>(null)
   const [iframeLoaded, setIframeLoaded] = useState(false)
+  const isResizing = resizeCursor !== null
 
   // Clean up any dangling resize listeners on unmount
   useEffect(() => {
@@ -62,6 +65,13 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
         e.source === iframeRef.current.contentWindow
       ) {
         setIframeHeight(id, e.data.height)
+        // Auto-set width from content if no custom width is set
+        if (e.data.width && !nodeWidths[id] && !data.customWidth) {
+          const contentW = Math.max(280, Math.min(e.data.width + 2, 1200))
+          if (Math.abs(contentW - data.variantWidth) > 20) {
+            setNodeWidth(id, contentW)
+          }
+        }
         if (!iframeLoaded) setIframeLoaded(true)
       }
     }
@@ -143,7 +153,7 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
     if (edge.target === id && edge.targetHandle) connectedHandles.add(`${edge.targetHandle}-target`)
   }
   const handleClass = (handleId: string, type: "source" | "target") =>
-    `!w-2 !h-2 ${focusMode || !connectedHandles.has(`${handleId}-${type}`) ? "!bg-transparent !border-transparent" : "!bg-border"}`
+    `!w-2 !h-2 ${focusMode || !connectedHandles.has(`${handleId}-${type}`) ? "!bg-transparent !border-transparent" : "!bg-[#ebebeb] !border-[#c0c0c0] dark:!bg-[#1e1e1e] dark:!border-[#444]"}`
 
   const chromeHidden = focusMode ? "opacity-0 pointer-events-none" : "opacity-100"
 
@@ -169,16 +179,25 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
       <div className={`flex items-center gap-2 pb-1.5 group/header transition-opacity duration-200 ${chromeHidden}`}>
         <span className={`text-[11px] font-medium rounded-[5px] px-1.5 py-0.5 uppercase tracking-wide shrink-0 transition-colors duration-200 ${
           isFocused
-            ? "text-blue-600 bg-blue-50"
+            ? "text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-950"
             : "text-muted-foreground bg-muted"
         }`}>
           {id}
         </span>
         <span className={`text-sm font-semibold uppercase tracking-wide truncate transition-colors duration-200 ${
-          isFocused ? "text-blue-600" : "text-muted-foreground"
+          isFocused ? "text-blue-600 dark:text-blue-400" : "text-muted-foreground"
         }`}>
           {data.label}
         </span>
+        {isAgentActive && (
+          <span className="flex items-center gap-1.5 text-[11px] font-medium rounded-[5px] px-1.5 py-0.5 shrink-0" style={{ color: '#C27152' }}>
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: '#C27152' }} />
+              <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: '#C27152' }} />
+            </span>
+            {activity === 'editing' ? 'Generating' : 'Reading'}
+          </span>
+        )}
         {annotationCount > 0 && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-blue-600 bg-blue-50 rounded-[5px] px-1.5 py-0.5 shrink-0">
             <MessageCircle className="h-3 w-3" />
@@ -235,18 +254,23 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
           className={`rounded-2xl overflow-hidden relative group/preview ${
             isFocused
               ? "ring-2 ring-blue-500 border border-transparent"
-              : focusMode
-                ? "border border-transparent cursor-pointer"
-                : "border border-black/10 cursor-pointer"
+              : isAgentActive
+                ? "ring-2 border border-transparent cursor-pointer"
+                : focusMode
+                  ? "border border-transparent cursor-pointer"
+                  : "border border-border cursor-pointer"
           }`}
           style={{
             width: previewWidth,
             height: previewHeight,
-            transition: "box-shadow 200ms cubic-bezier(0.165, 0.84, 0.44, 1), border-color 200ms cubic-bezier(0.165, 0.84, 0.44, 1)",
+            ...(isAgentActive && !isFocused ? { '--tw-ring-color': '#C27152' } as React.CSSProperties : {}),
+            transition: isResizing
+              ? "box-shadow 200ms cubic-bezier(0.165, 0.84, 0.44, 1), border-color 200ms cubic-bezier(0.165, 0.84, 0.44, 1)"
+              : "width 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94), height 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94), box-shadow 400ms cubic-bezier(0.165, 0.84, 0.44, 1), border-color 400ms cubic-bezier(0.165, 0.84, 0.44, 1)",
           }}
           onClick={(e) => {
             e.stopPropagation()
-            if (!isFocused) enterFocus(id)
+            if (!isFocused) enterFocus(id, e.clientX, e.clientY)
           }}
         >
           <iframe
@@ -261,26 +285,28 @@ function VariantNodeInner({ id, data }: VariantNodeProps) {
               width: previewWidth,
               height: isFocused ? Math.min(previewHeight, window.innerHeight - 100) : previewHeight,
               pointerEvents: isFocused ? "auto" : "none",
+              opacity: iframeLoaded ? 1 : 0,
+              transition: "opacity 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
             }}
             title={`${id} — ${data.label}`}
             sandbox="allow-scripts allow-same-origin allow-forms"
           />
           {/* Skeleton loading overlay — fades out when iframe reports first height */}
-          {!iframeLoaded && (
-            <div
-              className="absolute inset-0 rounded-2xl bg-neutral-100 animate-pulse"
-              style={{
-                transition: "opacity 300ms ease-out",
-              }}
-            >
-              <div className="flex flex-col gap-3 p-4">
-                <div className="h-4 w-2/3 rounded bg-neutral-200" />
-                <div className="h-3 w-full rounded bg-neutral-200" />
-                <div className="h-3 w-5/6 rounded bg-neutral-200" />
-                <div className="flex-1 mt-2 rounded-lg bg-neutral-200 min-h-[80px]" />
-              </div>
+          <div
+            className="absolute inset-0 rounded-2xl bg-neutral-100 dark:bg-neutral-800"
+            style={{
+              opacity: iframeLoaded ? 0 : 1,
+              pointerEvents: iframeLoaded ? "none" : "auto",
+              transition: "opacity 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
+            }}
+          >
+            <div className="flex flex-col gap-3 p-4 animate-pulse">
+              <div className="h-4 w-2/3 rounded bg-neutral-200 dark:bg-neutral-700" />
+              <div className="h-3 w-full rounded bg-neutral-200 dark:bg-neutral-700" />
+              <div className="h-3 w-5/6 rounded bg-neutral-200 dark:bg-neutral-700" />
+              <div className="flex-1 mt-2 rounded-lg bg-neutral-200 dark:bg-neutral-700 min-h-[80px]" />
             </div>
-          )}
+          </div>
           {/* Hover overlay with hint — only when not focused */}
           {!isFocused && (
             <div className="absolute inset-0 bg-black/0 group-hover/preview:bg-black/5 transition-colors flex items-center justify-center">

@@ -3,7 +3,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { LayoutGrid, Focus, EyeOff } from "lucide-react"
+import { LayoutGrid, Focus, EyeOff, Moon, Sun, TerminalSquare } from "lucide-react"
 
 export type FilterMode = "all" | "hidden"
 
@@ -15,6 +15,10 @@ interface ToolbarProps {
   filter: FilterMode
   onFilterChange: (filter: FilterMode) => void
   onTidyUp: () => void
+  darkMode: boolean
+  onDarkModeToggle: () => void
+  terminalOpen: boolean
+  onTerminalToggle: () => void
   onExitFocus?: () => void
 }
 
@@ -22,26 +26,6 @@ const exitFocusClick = (onExitFocus?: () => void) => (e: React.MouseEvent) => {
   if (onExitFocus && (e.target as HTMLElement).closest("button") === null) {
     onExitFocus()
   }
-}
-
-const maskLeft: React.CSSProperties = {
-  background: "#ebebeb",
-  WebkitMaskImage:
-    "linear-gradient(to bottom, black 40%, transparent), linear-gradient(to right, black 60%, transparent)",
-  WebkitMaskComposite: "source-in",
-  maskImage:
-    "linear-gradient(to bottom, black 40%, transparent), linear-gradient(to right, black 60%, transparent)",
-  maskComposite: "intersect",
-}
-
-const maskRight: React.CSSProperties = {
-  background: "#ebebeb",
-  WebkitMaskImage:
-    "linear-gradient(to bottom, black 40%, transparent), linear-gradient(to left, black 60%, transparent)",
-  WebkitMaskComposite: "source-in",
-  maskImage:
-    "linear-gradient(to bottom, black 40%, transparent), linear-gradient(to left, black 60%, transparent)",
-  maskComposite: "intersect",
 }
 
 // ease-out-quart — snappy entrance, smooth settle
@@ -55,15 +39,22 @@ export function Toolbar({
   filter,
   onFilterChange,
   onTidyUp,
+  darkMode,
+  onDarkModeToggle,
+  terminalOpen,
+  onTerminalToggle,
   onExitFocus,
 }: ToolbarProps) {
+  const canvasBg = darkMode ? "#1e1e1e" : "#ebebeb"
+
   return (
     <>
-      {/* Left: title — slides up and fades out in focus mode */}
+      {/* Left: title — blurred background layer + sharp content on top */}
       <div
-        className="fixed top-0 left-0 z-50 pl-4 pr-12 pb-6"
+        className="fixed z-50"
         style={{
-          ...maskLeft,
+          top: -40,
+          left: -40,
           opacity: focusMode ? 0 : 1,
           transform: focusMode ? "translateY(-8px)" : "translateY(0)",
           transition: `opacity ${focusMode ? "150ms" : "200ms"} ${EASE_OUT}, transform ${focusMode ? "150ms" : "200ms"} ${EASE_OUT}`,
@@ -72,30 +63,56 @@ export function Toolbar({
         }}
         onClick={exitFocusClick(onExitFocus)}
       >
-        <div className="h-12 flex items-center">
-          <span className="text-sm font-semibold tracking-tight leading-none">
-            {component || "Protocanvas"}
-          </span>
+        {/* Blurred bg layer */}
+        <div style={{
+          position: "absolute",
+          inset: 0,
+          background: canvasBg,
+          borderRadius: "0 0 24px 0", /* only bottom-right */
+          filter: "blur(16px)",
+        }} />
+        {/* Sharp content on top */}
+        <div style={{ position: "relative", zIndex: 1, paddingTop: 40, paddingLeft: 62, paddingRight: 32, paddingBottom: 12 }}>
+          <div className="h-12 flex items-center">
+            <span className="text-sm font-semibold tracking-tight leading-none" style={{ color: darkMode ? "#e0e0e0" : undefined }}>
+              {component || "Protocanvas"}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Right: controls container */}
+      {/* Right: controls container — blurred bg layer + sharp content */}
       <div
-        className="fixed top-0 right-0 z-50 pr-4 pl-12 pb-6"
-        style={focusMode ? undefined : maskRight}
+        className="fixed z-50"
+        style={{
+          top: -40,
+          right: -40,
+        }}
         onClick={exitFocusClick(onExitFocus)}
       >
+        {/* Blurred bg layer */}
+        <div style={{
+          position: "absolute",
+          inset: 0,
+          background: canvasBg,
+          borderRadius: "0 0 0 24px", /* only bottom-left */
+          filter: "blur(16px)",
+        }} />
+        {/* Sharp content on top */}
+        <div style={{ position: "relative", zIndex: 1, paddingTop: 40, paddingRight: 48, paddingBottom: 12, paddingLeft: 32 }}>
         <div className="h-12 flex items-center">
-          <div className="flex items-center gap-0.5">
+          <div className="flex items-center gap-1">
             {/* Hidden cards toggle + Tidy up — fade out in focus mode */}
             <div
-              className="flex items-center gap-0.5"
+              className="flex items-center gap-1"
               style={{
                 opacity: focusMode ? 0 : 1,
+                width: focusMode ? 0 : "auto",
+                overflow: "hidden",
                 transform: focusMode ? "translateX(8px) scale(0.95)" : "translateX(0) scale(1)",
-                transition: `opacity ${focusMode ? "120ms" : "200ms"} ${EASE_OUT}, transform ${focusMode ? "120ms" : "200ms"} ${EASE_OUT}`,
+                transition: `opacity ${focusMode ? "120ms" : "200ms"} ${EASE_OUT}, transform ${focusMode ? "120ms" : "200ms"} ${EASE_OUT}, width ${focusMode ? "120ms" : "200ms"} ${EASE_OUT}`,
                 pointerEvents: focusMode ? "none" : "auto",
-                willChange: "transform, opacity",
+                willChange: "transform, opacity, width",
               }}
             >
               {hiddenCount > 0 && (
@@ -103,10 +120,10 @@ export function Toolbar({
                   <TooltipTrigger
                     render={
                       <button
-                        className={`h-7 px-2 flex items-center gap-1.5 rounded-[6px] transition-colors cursor-pointer ${
+                        className={`h-8 px-2.5 flex items-center gap-1.5 rounded-md transition-colors cursor-pointer ${
                           filter === "hidden"
-                            ? "bg-foreground text-background"
-                            : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                            ? "bg-foreground/10 text-foreground"
+                            : "text-muted-foreground hover:text-foreground"
                         }`}
                         onClick={() => onFilterChange(filter === "hidden" ? "all" : "hidden")}
                       />
@@ -125,7 +142,7 @@ export function Toolbar({
                 <TooltipTrigger
                   render={
                     <button
-                      className="h-7 w-7 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
+                      className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
                       onClick={onTidyUp}
                     />
                   }
@@ -134,17 +151,33 @@ export function Toolbar({
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="text-xs">Tidy up</TooltipContent>
               </Tooltip>
+
             </div>
 
-            {/* Focus toggle — always visible, rightmost position */}
+            {/* Dark mode */}
             <Tooltip>
               <TooltipTrigger
                 render={
                   <button
-                    className={`h-7 w-7 flex items-center justify-center rounded-[6px] transition-colors cursor-pointer ${
+                    className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                    onClick={onDarkModeToggle}
+                  />
+                }
+              >
+                {darkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">{darkMode ? "Light mode" : "Dark mode"}</TooltipContent>
+            </Tooltip>
+
+            {/* Focus toggle */}
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    className={`h-8 w-8 flex items-center justify-center rounded-md transition-colors cursor-pointer ${
                       focusMode
-                        ? "bg-foreground text-background"
-                        : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                        ? "bg-foreground/10 text-foreground"
+                        : "text-muted-foreground hover:text-foreground"
                     }`}
                     onClick={onFocusModeToggle}
                   />
@@ -156,7 +189,28 @@ export function Toolbar({
                 Focus mode <kbd className="ml-1.5 px-1 py-0.5 bg-white/15 rounded text-[10px] font-mono">F</kbd>
               </TooltipContent>
             </Tooltip>
+
+            {/* Terminal toggle */}
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    className={`h-8 w-8 flex items-center justify-center rounded-md transition-colors cursor-pointer ${
+                      terminalOpen
+                        ? "bg-foreground/10 text-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    onClick={onTerminalToggle}
+                  />
+                }
+              >
+                <TerminalSquare className="h-3.5 w-3.5" />
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">Terminal</TooltipContent>
+            </Tooltip>
+
           </div>
+        </div>
         </div>
       </div>
     </>

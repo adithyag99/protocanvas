@@ -60,7 +60,7 @@ export default defineConfig({
   server: {
     port: Number(process.env.VITE_PORT) || 5174,
     fs: {
-      allow: [resolvedVariantsDir, '.'],
+      allow: [resolvedVariantsDir, resolve(resolvedVariantsDir, '..'), '.'],
     },
   },
   optimizeDeps: {

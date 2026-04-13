@@ -32,3 +32,7 @@ registry.json
 
 # Swift build artifacts
 manager/.build/
+
+# Terminal prototype (standalone experiment)
+terminal-prototype/
+playground/

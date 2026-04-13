@@ -143,6 +143,73 @@ describe("deepMergeState", () => {
     expect(result.edges).toEqual([])
   })
 
+  it("preserves position when node has _userMoved flag", () => {
+    const existing = {
+      nodes: {
+        a: { id: "a", position: { x: 200, y: 300 }, label: "A", _userMoved: true },
+      },
+    }
+    const partial = {
+      nodes: {
+        a: { position: { x: 0, y: 0 }, label: "Updated A", rationale: "new" },
+      },
+    }
+    const result = deepMergeState(existing, partial)
+    // Position should be preserved (user dragged it)
+    expect(result.nodes.a.position).toEqual({ x: 200, y: 300 })
+    // Other fields should still merge
+    expect(result.nodes.a.label).toBe("Updated A")
+    expect(result.nodes.a.rationale).toBe("new")
+    expect(result.nodes.a._userMoved).toBe(true)
+  })
+
+  it("allows position update from canvas sync (update includes _userMoved)", () => {
+    const existing = {
+      nodes: {
+        a: { id: "a", position: { x: 200, y: 300 }, _userMoved: true },
+      },
+    }
+    const partial = {
+      nodes: {
+        a: { position: { x: 500, y: 600 }, _userMoved: true },
+      },
+    }
+    const result = deepMergeState(existing, partial)
+    // Canvas sync includes _userMoved — position should be updated
+    expect(result.nodes.a.position).toEqual({ x: 500, y: 600 })
+  })
+
+  it("overwrites position when node does NOT have _userMoved flag", () => {
+    const existing = {
+      nodes: {
+        a: { id: "a", position: { x: 200, y: 300 }, label: "A" },
+      },
+    }
+    const partial = {
+      nodes: {
+        a: { position: { x: 0, y: 0 }, label: "Updated A" },
+      },
+    }
+    const result = deepMergeState(existing, partial)
+    expect(result.nodes.a.position).toEqual({ x: 0, y: 0 })
+    expect(result.nodes.a.label).toBe("Updated A")
+  })
+
+  it("overwrites position when _userMoved is false", () => {
+    const existing = {
+      nodes: {
+        a: { id: "a", position: { x: 200, y: 300 }, _userMoved: false },
+      },
+    }
+    const partial = {
+      nodes: {
+        a: { position: { x: 50, y: 50 } },
+      },
+    }
+    const result = deepMergeState(existing, partial)
+    expect(result.nodes.a.position).toEqual({ x: 50, y: 50 })
+  })
+
   it("removeNodes alone removes nodes and their edges", () => {
     const existing = {
       nodes: {

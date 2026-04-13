@@ -22,7 +22,14 @@ export function deepMergeState(existing, partial) {
       result.nodes = { ...(existing.nodes || {}) };
       for (const [id, nodeUpdate] of Object.entries(partial.nodes)) {
         if (result.nodes[id]) {
-          result.nodes[id] = { ...result.nodes[id], ...nodeUpdate };
+          // Preserve position if user has manually moved this node
+          // Only skip when the update is NOT from the canvas itself (canvas always sends _userMoved)
+          if (result.nodes[id]._userMoved && nodeUpdate.position && !nodeUpdate._userMoved) {
+            const { position, ...rest } = nodeUpdate;
+            result.nodes[id] = { ...result.nodes[id], ...rest };
+          } else {
+            result.nodes[id] = { ...result.nodes[id], ...nodeUpdate };
+          }
         } else {
           result.nodes[id] = nodeUpdate;
         }

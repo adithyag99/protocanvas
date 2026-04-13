@@ -15,6 +15,10 @@ export default defineConfig({
       "/api": "http://localhost:4444",
       "/variants": "http://localhost:4444",
       "/__feedback": "http://localhost:4444",
+      "/ws/terminal": {
+        target: "ws://localhost:4444",
+        ws: true,
+      },
       "/__reload": {
         target: "http://localhost:4444",
         // SSE needs these headers preserved

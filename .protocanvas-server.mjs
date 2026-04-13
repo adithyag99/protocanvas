@@ -1,8 +1,9 @@
 import { createServer } from 'node:http';
-import { readFileSync, readFile, writeFile, rename, watch, stat, readdirSync } from 'node:fs';
+import { readFileSync, readFile, writeFile, rename, watch, stat, readdirSync, mkdirSync } from 'node:fs';
 import { join, resolve, extname, normalize } from 'node:path';
 import { spawn } from 'node:child_process';
 import { deepMergeState } from './server/deep-merge-state.mjs';
+import { createTerminalManager } from './server/terminal-manager.mjs';
 
 // ── Args ──
 const PROJECT_DIR = resolve(process.argv[2] || '.');
@@ -163,12 +164,43 @@ function cleanupVite() {
     viteProcess = null;
   }
 }
-process.on('exit', cleanupVite);
-process.on('SIGINT', () => { cleanupVite(); process.exit(); });
-process.on('SIGTERM', () => { cleanupVite(); process.exit(); });
+let termManager = null;
+
+function cleanupAll() {
+  cleanupVite();
+  if (termManager) termManager.shutdown();
+}
+process.on('exit', cleanupAll);
+process.on('SIGINT', () => { cleanupAll(); process.exit(); });
+process.on('SIGTERM', () => { cleanupAll(); process.exit(); });
 
 // ── In-memory state cache ──
 let stateCache = null;
+
+// ── Agent activity tracking ──
+// Tracks which variants are being actively worked on. Ephemeral — not persisted.
+// Each entry auto-expires after ACTIVITY_TTL ms of no updates.
+const ACTIVITY_TTL = 8000; // 8 seconds
+const agentActivity = new Map(); // variantId → { action, updatedAt, timer }
+
+function setActivity(variantId, action) {
+  const existing = agentActivity.get(variantId);
+  if (existing?.timer) clearTimeout(existing.timer);
+
+  if (action === 'idle') {
+    agentActivity.delete(variantId);
+    broadcast({ type: 'agent-activity', variantId, action: 'idle' });
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    agentActivity.delete(variantId);
+    broadcast({ type: 'agent-activity', variantId, action: 'idle' });
+  }, ACTIVITY_TTL);
+
+  agentActivity.set(variantId, { action, updatedAt: Date.now(), timer });
+  broadcast({ type: 'agent-activity', variantId, action });
+}
 
 // ── Persistent annotation storage ──
 // Annotations from Agentation are forwarded here via the canvas app.
@@ -258,6 +290,47 @@ try {
   });
 } catch { /* file may not exist yet */ }
 
+// ── Auto-create node helpers ──
+// Infer parent ID from variant ID scheme: v3a → v3, v3a2 → v3a, v1 → null
+function inferParentId(variantId) {
+  if (/^\d+$/.test(variantId.slice(1))) return null; // v1, v2, etc. — root variants
+  // Strip trailing letter or number segment: v3a2b → v3a2, v3a → v3
+  const match = variantId.match(/^(.+?)([a-z]\d*|\d+[a-z]*)$/);
+  if (match) {
+    const candidate = match[1];
+    if (candidate.length >= 2) return candidate; // at least "v1"
+  }
+  return null;
+}
+
+// Compute position for auto-created node: below parent, or end of row for roots
+// Uses both parentId field AND ID-scheme inference to count siblings correctly
+function autoNodePosition(variantId, nodes) {
+  const parentId = inferParentId(variantId);
+  if (parentId && nodes[parentId]) {
+    const parent = nodes[parentId];
+    // Count siblings by BOTH parentId field and ID-scheme inference
+    // (Claude sessions may not set parentId on nodes they create)
+    const siblings = Object.values(nodes).filter(n => {
+      if (n.id === variantId) return false; // don't count self
+      return n.parentId === parentId || inferParentId(n.id) === parentId;
+    });
+    return {
+      x: parent.position.x + siblings.length * 512,
+      y: parent.position.y + 400,
+    };
+  }
+  // Root variant — place at end of row
+  const rootNodes = Object.values(nodes).filter(n => {
+    if (n.id === variantId) return false;
+    return !n.parentId && inferParentId(n.id) === null;
+  });
+  const maxX = rootNodes.length > 0
+    ? Math.max(...rootNodes.map(n => n.position.x))
+    : -512;
+  return { x: maxX + 512, y: 0 };
+}
+
 // Watch variants directory — both .html and .tsx
 // Debounced per-file: macOS fires multiple events per save
 const variantTimers = new Map();
@@ -267,6 +340,50 @@ try {
       if (variantTimers.has(filename)) clearTimeout(variantTimers.get(filename));
       variantTimers.set(filename, setTimeout(() => {
         variantTimers.delete(filename);
+
+        // Auto-create node if variant file is new and no node exists yet
+        const variantId = filename.replace(/\.(tsx|html)$/, '');
+        const ext = filename.endsWith('.tsx') ? 'tsx' : 'html';
+        const nodes = stateCache?.nodes || {};
+        if (!nodes[variantId]) {
+          const parentId = inferParentId(variantId);
+          const position = autoNodePosition(variantId, nodes);
+          const newNode = {
+            id: variantId,
+            label: variantId,
+            parentId,
+            type: ext,
+            position,
+            htmlFile: filename,
+            createdAt: new Date().toISOString(),
+          };
+          const partial = { nodes: { [variantId]: newNode } };
+          // If there's a parent, auto-create the edge (only if no edge TO this node exists yet)
+          if (parentId && nodes[parentId]) {
+            const existingEdges = stateCache?.edges || [];
+            const alreadyConnected = existingEdges.some(e => e.to === variantId);
+            if (!alreadyConnected) {
+              partial.edges = [...existingEdges, { from: parentId, to: variantId, label: 'auto' }];
+            }
+          }
+          const merged = deepMergeState(stateCache || {}, partial);
+          stateCache = merged;
+          const jsonStr = JSON.stringify(merged, null, 2);
+          lastWrittenContent = jsonStr;
+          const tmpFile = STATE_FILE + '.tmp';
+          writeFile(tmpFile, jsonStr, 'utf8', (writeErr) => {
+            if (writeErr) { lastWrittenContent = null; return; }
+            rename(tmpFile, STATE_FILE, (renameErr) => {
+              if (renameErr) { lastWrittenContent = null; return; }
+              broadcast({ type: 'state-changed' });
+              console.log(`[watcher] Auto-created node for ${variantId}`);
+            });
+          });
+        }
+
+        // Signal agent activity — variant is being edited
+        setActivity(variantId, 'editing');
+
         broadcast({ type: 'variant-changed', file: filename });
 
         // If a new .tsx file appears and Vite isn't running, start it
@@ -549,6 +666,184 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // ── Agent activity ──
+  // POST /api/activity — report agent activity on a variant (editing, reading)
+  // GET /api/activity — get all active variants
+  if (pathname === '/api/activity' && req.method === 'POST') {
+    readBody(req, res, (body) => {
+      let data;
+      try { data = JSON.parse(body); } catch {
+        res.writeHead(400); res.end('Invalid JSON'); return;
+      }
+      const { variantId, action } = data;
+      if (!variantId || !action) {
+        res.writeHead(400); res.end('{"error":"variantId and action required"}'); return;
+      }
+      setActivity(variantId, action);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    return;
+  }
+
+  if (pathname === '/api/activity' && req.method === 'GET') {
+    const active = {};
+    for (const [vid, entry] of agentActivity) {
+      active[vid] = entry.action;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ active }));
+    return;
+  }
+
+  // ── POST /api/duplicate — copy variant file + create node with correct lineage ID ──
+  if (pathname === '/api/duplicate' && req.method === 'POST') {
+    readBody(req, res, (body) => {
+      let data;
+      try { data = JSON.parse(body); } catch {
+        res.writeHead(400); res.end('Invalid JSON'); return;
+      }
+      const { sourceId } = data;
+      if (!sourceId || !stateCache?.nodes?.[sourceId]) {
+        res.writeHead(400); res.end('{"error":"sourceId not found"}'); return;
+      }
+      const sourceNode = stateCache.nodes[sourceId];
+
+      // Derive next child ID using the variant ID scheme
+      const existingChildren = Object.values(stateCache.nodes).filter(n => n.parentId === sourceId);
+      const sourceEndsWithNumber = /\d$/.test(sourceId);
+      let nextSuffix;
+      if (sourceEndsWithNumber) {
+        // Children use letters: v3 → v3a, v3b, ...
+        const usedLetters = existingChildren.map(c => c.id.replace(sourceId, '')).filter(s => /^[a-z]$/.test(s));
+        const nextCharCode = usedLetters.length > 0
+          ? Math.max(...usedLetters.map(s => s.charCodeAt(0))) + 1
+          : 97; // 'a'
+        nextSuffix = String.fromCharCode(nextCharCode);
+      } else {
+        // Children use numbers: v3a → v3a1, v3a2, ...
+        const usedNumbers = existingChildren.map(c => {
+          const num = c.id.replace(sourceId, '');
+          return /^\d+$/.test(num) ? parseInt(num) : 0;
+        }).filter(n => n > 0);
+        nextSuffix = String(usedNumbers.length > 0 ? Math.max(...usedNumbers) + 1 : 1);
+      }
+      const newId = sourceId + nextSuffix;
+      const ext = sourceNode.htmlFile?.endsWith('.tsx') ? '.tsx' : '.html';
+      const newFile = newId + ext;
+
+      // Copy the file
+      const srcPath = join(VARIANTS_DIR, sourceNode.htmlFile);
+      const dstPath = join(VARIANTS_DIR, newFile);
+      readFile(srcPath, 'utf8', (readErr, content) => {
+        if (readErr) {
+          res.writeHead(500); res.end(`{"error":"Failed to read source: ${readErr.message}"}`); return;
+        }
+        // Replace function name if TSX (e.g., V3 → V3a)
+        let newContent = content;
+        if (ext === '.tsx') {
+          const oldFn = sourceId.charAt(0).toUpperCase() + sourceId.slice(1);
+          const newFn = newId.charAt(0).toUpperCase() + newId.slice(1);
+          newContent = content.replace(new RegExp(`function ${oldFn}\\b`), `function ${newFn}`)
+            .replace(new RegExp(`export default ${oldFn}\\b`), `export default ${newFn}`);
+        }
+        writeFile(dstPath, newContent, 'utf8', (writeErr) => {
+          if (writeErr) {
+            res.writeHead(500); res.end(`{"error":"Failed to write: ${writeErr.message}"}`); return;
+          }
+          // Create node + edge (the file watcher will also detect it, but we do it here for instant response)
+          const newNode = {
+            id: newId,
+            label: `${sourceNode.label} (copy)`,
+            parentId: sourceId,
+            type: sourceNode.type || (ext === '.tsx' ? 'tsx' : 'html'),
+            position: { x: sourceNode.position.x + 480, y: sourceNode.position.y },
+            htmlFile: newFile,
+            createdAt: new Date().toISOString(),
+          };
+          const existingEdges = stateCache?.edges || [];
+          const partial = {
+            nodes: { [newId]: newNode },
+            edges: [...existingEdges, { from: sourceId, to: newId, label: 'duplicate' }],
+          };
+          const merged = deepMergeState(stateCache || {}, partial);
+          stateCache = merged;
+          const jsonStr = JSON.stringify(merged, null, 2);
+          lastWrittenContent = jsonStr;
+          const tmpFile = STATE_FILE + '.tmp';
+          writeFile(tmpFile, jsonStr, 'utf8', (we) => {
+            if (we) { lastWrittenContent = null; res.writeHead(500); res.end('Write error'); return; }
+            rename(tmpFile, STATE_FILE, (re) => {
+              if (re) { lastWrittenContent = null; res.writeHead(500); res.end('Write error'); return; }
+              broadcast({ type: 'state-changed' });
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, newId, newFile }));
+            });
+          });
+        });
+      });
+    });
+    return;
+  }
+
+  // ── POST /api/clipboard/upload — save pasted image to /tmp, return path ──
+  if (pathname === '/api/clipboard/upload' && req.method === 'POST') {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 10 * 1024 * 1024) { req.destroy(); return; } // 10MB limit
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      const buf = Buffer.concat(chunks);
+      const boundary = req.headers['content-type']?.match(/boundary=(.+)/)?.[1];
+      if (!boundary) { res.writeHead(400); res.end('Missing boundary'); return; }
+
+      // Parse multipart — find the file data
+      const boundaryBuf = Buffer.from('--' + boundary);
+      const parts = [];
+      let start = 0;
+      while (true) {
+        const idx = buf.indexOf(boundaryBuf, start);
+        if (idx === -1) break;
+        if (start > 0) parts.push(buf.slice(start, idx - 2)); // -2 for \r\n
+        start = idx + boundaryBuf.length + 2; // skip boundary + \r\n
+      }
+
+      for (const part of parts) {
+        const headerEnd = part.indexOf('\r\n\r\n');
+        if (headerEnd === -1) continue;
+        const headers = part.slice(0, headerEnd).toString();
+        if (!headers.includes('filename=')) continue;
+
+        const fileData = part.slice(headerEnd + 4);
+        const filenameMatch = headers.match(/filename="(.+?)"/);
+        const ext = filenameMatch?.[1]?.match(/\.\w+$/)?.[0] || '.png';
+        const tmpDir = '/tmp/protocanvas-clipboard';
+        try { mkdirSync(tmpDir, { recursive: true }); } catch {}
+        const filename = `paste-${Date.now()}${ext}`;
+        const filePath = join(tmpDir, filename);
+
+        writeFile(filePath, fileData, (err) => {
+          if (err) { res.writeHead(500); res.end(`{"error":"${err.message}"}`); return; }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, filePath }));
+        });
+        return;
+      }
+      res.writeHead(400); res.end('{"error":"No file found in upload"}');
+    });
+    return;
+  }
+
+  // ── GET /api/terminal/status ──
+  if (pathname === '/api/terminal/status' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(termManager ? termManager.getStatus() : { available: false }));
+    return;
+  }
+
   // ── GET /variants/{id}.html — serve HTML variants ──
   if (pathname.startsWith('/variants/') && req.method === 'GET') {
     const filename = pathname.slice('/variants/'.length);
@@ -630,11 +925,38 @@ const server = createServer((req, res) => {
   });
 });
 
+// WebSocket upgrade handler — routes /ws/terminal to terminal manager
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  if (url.pathname === '/ws/terminal' && termManager) {
+    termManager.handleUpgrade(req, socket, head);
+  } else {
+    socket.destroy();
+  }
+});
+
 // Start Vite renderer first (if needed), then start main server
 startViteRenderer()
   .catch(err => console.error('Vite start error:', err))
   .finally(async () => {
     const port = await listenOnPort(server, CANVAS_PORT);
+
+    // Initialize terminal manager — pass linked Claude session if one exists
+    let claudeSessionId = null;
+    try {
+      const { loadRegistry } = await import('./bin/registry.mjs');
+      const reg = loadRegistry();
+      const entry = reg.canvases[COMPONENT];
+      if (entry?.sessions?.length > 0) {
+        claudeSessionId = entry.sessions[0].sessionId;
+      }
+    } catch {}
+    termManager = createTerminalManager(server, {
+      projectDir: PROJECT_DIR,
+      component: COMPONENT,
+      claudeSessionId,
+      variantsDir: VARIANTS_DIR_NAME,
+    });
     console.log(`DESIGN_CANVAS_PORT=${port}`);
     console.log(`Canvas app: http://localhost:${port}`);
     console.log(`Component: ${COMPONENT}`);

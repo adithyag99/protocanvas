@@ -21,8 +21,10 @@ import { SnapGuides } from "@/components/SnapGuides"
 import { snapPosition, type Guide } from "@/lib/snap"
 import { ContextMenu } from "@/components/ContextMenu"
 import { SyncStatus } from "@/components/SyncStatus"
+import { TerminalPanel } from "@/components/TerminalPanel"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { useCanvasStore } from "@/store/canvasStore"
+import { useTerminalStore } from "@/store/terminalStore"
 
 const nodeTypes = { variant: VariantNode }
 const edgeTypes = { iteration: IterationEdge }
@@ -30,7 +32,7 @@ const edgeTypes = { iteration: IterationEdge }
 type InteractionMode = "select" | "pan"
 
 function Canvas() {
-  const { fitView, getNodes, getNode, getViewport, setViewport, zoomTo } = useReactFlow()
+  const { fitView, getNodes, getViewport, setViewport, zoomTo } = useReactFlow()
   const {
     config,
     canvasState,
@@ -43,6 +45,7 @@ function Canvas() {
     toggleFocusMode,
     focusedNodeId,
     exitFocus,
+    setAgentActivity,
   } = useCanvasStore()
 
   const [mode, setMode] = useState<InteractionMode>("select")
@@ -54,6 +57,29 @@ function Canvas() {
   const localNodesRef = useRef<Node[]>([])
   const escPressedRef = useRef(false)
   const [toast, setToast] = useState<string | null>(null)
+  const terminalOpen = useTerminalStore((s) => s.isOpen)
+  const terminalToggle = useTerminalStore((s) => s.toggle)
+  const [darkMode, setDarkMode] = useState(() => {
+    try { return sessionStorage.getItem("protocanvas-dark") === "true" } catch { return false }
+  })
+  // Toggle .dark class on root element — Tailwind handles all semantic colors
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", darkMode)
+  }, [darkMode])
+
+  // Set browser tab title to canvas name
+  useEffect(() => {
+    if (config?.component) document.title = config.component
+  }, [config?.component])
+
+  const toggleDarkMode = useCallback(() => {
+    // Just toggle — no overlay, no animation. Clean instant switch.
+    setDarkMode((prev) => {
+      const next = !prev
+      try { sessionStorage.setItem("protocanvas-dark", String(next)) } catch {}
+      return next
+    })
+  }, [])
 
   const effectiveMode = spaceHeld ? "pan" : mode
 
@@ -91,6 +117,11 @@ function Canvas() {
         e.target instanceof HTMLTextAreaElement
       )
         return
+
+      // Don't process canvas shortcuts when terminal is focused
+      if (useTerminalStore.getState().isFocused) return
+
+
 
       // Two-stage Escape: first press sends Escape into iframe (closes Agentation popups),
       // second press defocuses the card
@@ -187,6 +218,8 @@ function Canvas() {
           return
         }
       }
+      // Skip single-key shortcuts if modifier keys are held (allow Cmd+R reload etc.)
+      if (e.metaKey || e.ctrlKey) return
       if (e.code === "KeyV") { e.preventDefault(); setMode("select") }
       if (e.code === "KeyH") { e.preventDefault(); setMode("pan") }
       if (e.code === "KeyF") { e.preventDefault(); toggleFocusMode() }
@@ -241,44 +274,36 @@ function Canvas() {
     }
   }, [])
 
-  // Double-click focus: zoom to 100% and center on the focused node
+  // Focus: zoom to 100% toward click point if not already at 100%
   useEffect(() => {
     if (!focusedNodeId) return
 
-    // Save current viewport for restoration
     const currentVP = getViewport()
-    useCanvasStore.setState({ preFocusViewport: currentVP })
+    if (Math.abs(currentVP.zoom - 1) > 0.05) {
+      useCanvasStore.setState({ preFocusViewport: currentVP })
+      const clickPt = useCanvasStore.getState().focusClickPoint
+      // Zoom toward click point: the world coordinate under the cursor stays under the cursor
+      const screenX = clickPt?.x ?? window.innerWidth / 2
+      const screenY = clickPt?.y ?? window.innerHeight / 2
+      // World coordinate at click point: wx = (screenX - vp.x) / vp.zoom
+      const wx = (screenX - currentVP.x) / currentVP.zoom
+      const wy = (screenY - currentVP.y) / currentVP.zoom
+      // New viewport so that same world point stays at same screen position at zoom=1
+      const newX = screenX - wx
+      const newY = screenY - wy
+      setViewport({ x: newX, y: newY, zoom: 1 }, { duration: 300 })
+    }
+  }, [focusedNodeId, getViewport, setViewport])
 
-    const node = getNode(focusedNodeId)
-    if (!node) return
-
-    const nodeW = node.measured?.width ?? 452
-    const nodeH = node.measured?.height ?? 400
-    const windowW = window.innerWidth
-    const windowH = window.innerHeight
-
-    // Center with padding on all sides
-    // Center horizontally always
-    const x = -(node.position.x - (windowW - nodeW) / 2)
-
-    // Vertically: center if it fits, align to top (with padding) if taller than viewport
-    const topPadding = 64
-    const fitsVertically = nodeH < windowH - topPadding * 2
-    const y = fitsVertically
-      ? -(node.position.y - (windowH - nodeH) / 2)
-      : -(node.position.y - topPadding)
-
-    setViewport({ x, y, zoom: 1 }, { duration: 300 })
-  }, [focusedNodeId, getNode, getViewport, setViewport])
-
-  // Restore viewport when exiting focus
+  // Restore viewport zoom when exiting focus (if we changed it)
   const prevFocusedRef = useRef<string | null>(null)
   useEffect(() => {
     if (prevFocusedRef.current && !focusedNodeId) {
       const preFocusVP = useCanvasStore.getState().preFocusViewport
-      if (preFocusVP) {
+      if (preFocusVP && Math.abs(preFocusVP.zoom - 1) > 0.05) {
         setViewport(preFocusVP, { duration: 300 })
       }
+      useCanvasStore.setState({ preFocusViewport: null })
     }
     prevFocusedRef.current = focusedNodeId
   }, [focusedNodeId, setViewport])
@@ -329,6 +354,9 @@ function Canvas() {
         if (data.type === "annotation-added") {
           refetchAnnotationCounts()
         }
+        if (data.type === "agent-activity" && data.variantId) {
+          setAgentActivity(data.variantId, data.action)
+        }
         if (data.type === "annotations-resolved") {
           refetchAnnotationCounts()
           // Clear Agentation localStorage in the affected variant's iframe
@@ -343,7 +371,7 @@ function Canvas() {
       } catch {}
     }
     return () => es.close()
-  }, [refetchState, refetchAnnotationCounts])
+  }, [refetchState, refetchAnnotationCounts, setAgentActivity])
 
   // Convert canvas state to React Flow nodes
   const storeNodes: Node[] = useMemo(() => {
@@ -653,6 +681,10 @@ function Canvas() {
         filter={filter}
         onFilterChange={setFilter}
         onTidyUp={tidyUp}
+        darkMode={darkMode}
+        onDarkModeToggle={toggleDarkMode}
+        terminalOpen={terminalOpen}
+        onTerminalToggle={terminalToggle}
         onExitFocus={focusedNodeId ? exitFocus : undefined}
       />
       <ReactFlow
@@ -689,10 +721,10 @@ function Canvas() {
       >
         <Background
           variant={BackgroundVariant.Dots}
-          gap={20}
-          size={1}
-          color="#d4d4d4"
-          style={{ backgroundColor: "#ebebeb" }}
+          gap={24}
+          size={1.5}
+          color={darkMode ? "#333" : "#c0c0c0"}
+          style={{ backgroundColor: darkMode ? "#1e1e1e" : "#ebebeb" }}
         />
         <SnapGuides guides={guides} />
         {showMinimap && (
@@ -715,6 +747,7 @@ function Canvas() {
         />
       )}
       <SyncStatus />
+      <TerminalPanel />
       {toast && (
         <div
           className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 rounded-lg bg-foreground text-background px-4 py-2 text-sm font-medium shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-200"

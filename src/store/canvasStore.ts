@@ -22,6 +22,7 @@ interface CanvasStore {
   iframeHeights: Record<string, number>
   nodeWidths: Record<string, number>
   annotationCounts: Record<string, number>
+  agentActivity: Record<string, string> // variantId → action ('editing', 'reading', etc.)
   modalVariant: ModalVariant | null
 
   // View
@@ -40,7 +41,8 @@ interface CanvasStore {
 
   // Actions
   toggleFocusMode: () => void
-  enterFocus: (nodeId: string) => void
+  enterFocus: (nodeId: string, screenX?: number, screenY?: number) => void
+  focusClickPoint: { x: number; y: number } | null
   exitFocus: () => void
   removeNodes: (ids: string[]) => void
   undo: () => void
@@ -57,6 +59,7 @@ interface CanvasStore {
   syncState: () => Promise<void>
   refetchState: () => Promise<void>
   clearSyncError: () => void
+  setAgentActivity: (variantId: string, action: string) => void
 }
 
 let positionSyncTimer: ReturnType<typeof setTimeout> | null = null
@@ -69,6 +72,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   iframeHeights: {},
   nodeWidths: {},
   annotationCounts: {},
+  agentActivity: {},
   modalVariant: null,
   focusMode: false,
   focusedNodeId: null,
@@ -79,10 +83,25 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
 
   clearSyncError: () => set({ syncError: null }),
 
+  setAgentActivity: (variantId, action) => {
+    set((s) => {
+      if (action === 'idle') {
+        const { [variantId]: _, ...rest } = s.agentActivity
+        return { agentActivity: rest }
+      }
+      return { agentActivity: { ...s.agentActivity, [variantId]: action } }
+    })
+  },
+
   toggleFocusMode: () => set((s) => ({ focusMode: !s.focusMode })),
 
-  enterFocus: (nodeId: string) => {
-    set({ focusedNodeId: nodeId })
+  focusClickPoint: null,
+
+  enterFocus: (nodeId: string, screenX?: number, screenY?: number) => {
+    set({
+      focusedNodeId: nodeId,
+      focusClickPoint: screenX != null && screenY != null ? { x: screenX, y: screenY } : null,
+    })
   },
 
   exitFocus: () => {
@@ -117,7 +136,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
         ...state,
         nodes: {
           ...state.nodes,
-          [id]: { ...state.nodes[id], position: { x, y } },
+          [id]: { ...state.nodes[id], position: { x, y }, _userMoved: true },
         },
       },
     })
@@ -277,10 +296,11 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   syncState: async () => {
     const state = get().canvasState
     if (!state) return
-    const nodeData: Record<string, { position: { x: number; y: number }; customWidth?: number }> = {}
+    const nodeData: Record<string, { position: { x: number; y: number }; customWidth?: number; _userMoved?: boolean }> = {}
     for (const [id, node] of Object.entries(state.nodes)) {
       nodeData[id] = { position: node.position }
       if (node.customWidth) nodeData[id].customWidth = node.customWidth
+      if (node._userMoved) nodeData[id]._userMoved = true
     }
     try {
       await fetch("/api/state", {
@@ -298,6 +318,14 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     try {
       const res = await fetch("/api/state")
       const newState: CanvasState = await res.json()
+      // Re-fetch config if vitePort wasn't available on initial load
+      // (Vite starts after first TSX file appears in a new canvas)
+      const currentConfig = get().config
+      if (currentConfig && !currentConfig.vitePort) {
+        const configRes = await fetch("/api/config")
+        const newConfig: AppConfig = await configRes.json()
+        if (newConfig.vitePort) set({ config: newConfig })
+      }
       set({ canvasState: newState })
     } catch (err) {
       console.error("Failed to refetch state:", err)

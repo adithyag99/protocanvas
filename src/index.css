@@ -97,6 +97,16 @@
   html {
     @apply font-sans;
   }
+  .react-flow__background,
+  .react-flow__edge-path,
+  .react-flow__handle,
+  .fixed[class*="z-50"],
+  .fixed[class*="z-50"] button,
+  .fixed[class*="z-50"] div,
+  .xterm-viewport,
+  .xterm .xterm-screen {
+    transition: background-color 200ms ease, border-color 200ms ease, color 200ms ease, fill 200ms ease, stroke 200ms ease, filter 200ms ease;
+  }
 }
 
 /* Cursor overrides per interaction mode — controlled via data-mode on wrapper */
@@ -110,7 +120,12 @@
   cursor: grabbing !important;
 }
 
+:root {
+  --edge-stroke: rgba(0, 0, 0, 0.15);
+}
+
 .dark {
+  --edge-stroke: rgba(255, 255, 255, 0.08);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);

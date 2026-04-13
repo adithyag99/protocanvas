@@ -8,6 +8,7 @@ export interface VariantNodeData {
   hidden?: boolean
   customWidth?: number
   type?: "html" | "tsx"
+  _userMoved?: boolean
 }
 
 export interface CanvasEdge {
