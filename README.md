@@ -1,12 +1,14 @@
 # Protocanvas
 
-**An experimental canvas for designing React UI directly in code.**
+**An infinite canvas for designing with code through your own AI agent.**
 
-Protocanvas is a code-native design workspace for exploring UI directions side by side instead of iterating through a single linear chat thread. The power of tools like Figma comes from the canvas itself: you can branch ideas freely, compare versions spatially, and understand how a design evolved. That canvas-based workflow is mostly missing when designing directly with AI and code.
+Protocanvas is an infinite canvas for designing with code through your own AI agent. It gives AI-driven code iteration the missing canvas workflow: branching, side-by-side comparison, element-level feedback, and visible design evolution.
 
-Protocanvas brings that missing piece into the coding-first workflow. Each prototype lives on the canvas as a real React component or HTML variant, not a mockup. You can compare live iterations, annotate specific elements, and ask Claude to process the feedback without losing the context of previous versions.
+Each prototype lives on the canvas as a real React component or HTML variant, not a mockup. You can compare live iterations, annotate specific elements, and ask Claude to process the feedback without losing the context of previous versions.
 
-Status: Experimental beta. Works today for a real Claude-driven workflow. Codex support is planned next.
+Unlike many code-first AI design tools, Protocanvas does not lock your work inside a third-party product layer. You own the code, you own the workflow, and you can use your own AI agent instead of being forced into a specific hosted model or subscription.
+
+Status: Beta. Works today for a real Claude-driven workflow. Codex support is planned next.
 
 ## The Workflow Stack
 
@@ -23,7 +25,25 @@ That full stack is what makes the current workflow work end to end.
 
 - Loom walkthrough: https://www.loom.com/share/be91a696a44a4dfea66ec0a08f0e5655
 
-### Canvas Overview
+### Claude In The Canvas
+
+Claude Code running directly inside the canvas workflow
+
+![Protocanvas embedded terminal](shots/terminal.png)
+
+### Live Variants And Feedback
+
+Element-level annotations with [Agentation](https://www.agentation.com/)
+
+![Protocanvas Agentation annotations](shots/agentation.png)
+
+### Session Manager
+
+macOS manager for controlling local canvas sessions
+
+![Protocanvas manager](shots/manager.png)
+
+### Canvas Views
 
 Light mode
 
@@ -33,23 +53,12 @@ Dark mode
 
 ![Protocanvas dark mode canvas](shots/dark-mode.png)
 
-### In-Canvas Workflow
-
-Embedded terminal
-
-![Protocanvas embedded terminal](shots/terminal.png)
-
-Element-level annotations with [Agentation](https://www.agentation.com/)
-
-![Protocanvas Agentation annotations](shots/agentation.png)
-
-### Session Manager
-
-Experimental macOS manager
-
-![Protocanvas manager](shots/manager.png)
-
 ## Why It Exists
+
+Most code-first AI design tools have two big problems:
+
+- the workflow is too linear
+- the tool owns too much of the stack
 
 When you design in code with an AI coding assistant, the workflow is often too linear:
 
@@ -57,6 +66,19 @@ When you design in code with an AI coding assistant, the workflow is often too l
 - the previous version gets overwritten
 - you lose the ability to compare the old and new directions properly
 - it becomes harder to judge whether the change was actually an improvement
+
+At the same time, many products in this category ask you to hand over control:
+
+- your code lives inside their product workflow
+- your iteration loop depends on their UI and abstractions
+- you are tied to the model or subscription they choose to offer
+
+Protocanvas takes a different approach:
+
+- your prototypes are just code
+- your agent is your own agent
+- your workflow is assembled from tools you control
+- your output is not trapped inside a proprietary design surface
 
 Protocanvas is built around the missing canvas workflow:
 
@@ -81,6 +103,7 @@ Protocanvas is built around the missing canvas workflow:
 - **Spatial comparison**: multiple versions stay visible at once so you can judge changes in context
 - **Element-level annotations**: leave feedback on specific UI elements instead of writing ambiguous instructions
 - **AI inside a structured workflow**: Claude operates against variants, annotations, and lineage rather than a single chat-only loop
+- **Own the full stack**: the code, agent workflow, and iteration loop stay under your control
 - **Production-adjacent output**: the winning variant is already code, which reduces the jump from design to implementation
 
 ## Features
@@ -97,11 +120,11 @@ Protocanvas is built around the missing canvas workflow:
 - **TSX + HTML support**: render React components or plain HTML variants
 - **Keyboard shortcuts**: `V` select, `H` pan, `F` focus mode, `M` minimap, `R` reset zoom, `` ` `` terminal
 - **Embedded terminal**: Claude Code or another shell runs inside the canvas UI
-- **Manager app**: an experimental macOS menu bar utility for controlling local canvas sessions
+- **Manager app**: a macOS menu bar utility for controlling local canvas sessions
 
 ## Current Status
 
-Protocanvas is not being presented as a polished general-purpose production tool yet. It is an experimental beta built around a real working workflow that is already useful for interactive UI iteration.
+Protocanvas is not being presented as a polished general-purpose production tool yet. It is a beta built around a real working workflow that is already useful for interactive UI iteration.
 
 Current positioning:
 
@@ -116,7 +139,7 @@ Current positioning:
 - Codex support is the next planned integration.
 - Parts of the tooling are still tailored to the current local development environment.
 - The setup works, but it is not yet packaged as a polished one-command install.
-- The menu bar manager is still experimental and macOS-specific.
+- The menu bar manager is currently macOS-specific.
 
 ## How It Works
 
@@ -203,7 +226,7 @@ That skill-driven workflow is part of the current real-world usage model, but th
 
 ## Manager App
 
-Protocanvas also includes an experimental macOS menu bar manager for controlling local canvas sessions.
+Protocanvas also includes a macOS menu bar manager for controlling local canvas sessions.
 
 It is useful for:
 
@@ -212,7 +235,7 @@ It is useful for:
 - jumping back into existing canvases quickly
 - managing a local workflow where multiple canvases may be active at once
 
-This manager is part of the current working setup, but it is still macOS-specific and experimental.
+This manager is part of the current working setup, but it is still macOS-specific.
 
 ## Architecture
 
